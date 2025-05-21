@@ -1,0 +1,34 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.espIdfPathWin": "C:\\esp32\\v51\\esp-idf\\esp-idf",
+    "idf.openOcdConfigs": [
+        "interface/ftdi/esp32_devkitj_v1.cfg",
+        "target/esp32.cfg"
+    ],
+    "idf.portWin": "COM4",
+    "idf.toolsPathWin": "C:\\esp32\\v51\\.espressif",
+    "files.associations": {
+        "gpio.h": "c",
+        "rmt_encoder.h": "c",
+        "array": "c",
+        "ranges": "c",
+        "span": "c",
+        "vector": "c",
+        "xstring": "c",
+        "xutility": "c",
+        "string": "c",
+        "string_view": "c",
+        "stepper_driver_tmc2208.h": "c",
+        "esp_system.h": "c",
+        "stepper_motor_encoder.h": "c",
+        "gptimer.h": "c",
+        "stdbool.h": "c",
+        "typeinfo": "c"
+    },
+    "idf.flashType": "UART",
+    "idf.customExtraVars": {
+        "OPENOCD_SCRIPTS": "C:\\esp32\\v44\\.espressif\\tools\\openocd-esp32\\v0.11.0-esp32-20221026/openocd-esp32/share/openocd/scripts",
+        "IDF_CCACHE_ENABLE": "1",
+        "IDF_TARGET": "esp32"
+    }
+}
