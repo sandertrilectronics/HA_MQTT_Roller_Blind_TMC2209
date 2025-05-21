@@ -281,9 +281,24 @@ void ha_cb_button_setup(char *topic, char *data, int data_len)
     }
 }
 
+void ha_cb_number_rpm(char *topic, char *data, int data_len)
+{
+    int rpm;
+    char buffer[data_len + 1];
+    memset(buffer, 0, data_len + 1);
+    memcpy(buffer, data, data_len);
+    if (_atoi_checked(buffer, &rpm) == 0)
+    {
+        if (rpm >= 30 && rpm <= 300)
+        {
+            settings.max_speed = rpm;
+        }
+    }
+}
+
 ha_cover_param_t ha_cover = {
-    .name = "Roller Blind Door",
-    .device_name = "Roller Blind Door",
+    .name = "",
+    .device_name = "",
     .manufacturer = "Sander",
     .model = "RBS1",
     .identifiers = "RBS1",
@@ -291,8 +306,8 @@ ha_cover_param_t ha_cover = {
     .update_mqtt = ha_cb_cover_update};
 
 ha_switch_param_t ha_switch_mount = {
-    .name = "Roller Blind Mount Left",
-    .device_name = "Roller Blind Door",
+    .name = "",
+    .device_name = "",
     .manufacturer = "Sander",
     .model = "RBS1",
     .identifiers = "RBS1",
@@ -300,8 +315,8 @@ ha_switch_param_t ha_switch_mount = {
     .update_mqtt = ha_cb_switch_mount};
 
 ha_switch_param_t ha_switch_setup_enable = {
-    .name = "Roller Blind Setup Enable",
-    .device_name = "Roller Blind Door",
+    .name = "",
+    .device_name = "",
     .manufacturer = "Sander",
     .model = "RBS1",
     .identifiers = "RBS1",
@@ -309,8 +324,8 @@ ha_switch_param_t ha_switch_setup_enable = {
     .update_mqtt = ha_cb_switch_setup};
 
 ha_button_param_t ha_button_setup = {
-    .name = "Roller Blind Setup Step",
-    .device_name = "Roller Blind Door",
+    .name = "",
+    .device_name = "",
     .manufacturer = "Sander",
     .model = "RBS1",
     .identifiers = "RBS1",
@@ -318,12 +333,26 @@ ha_button_param_t ha_button_setup = {
     .update_mqtt = ha_cb_button_setup};
 
 ha_text_param_t ha_text_status = {
-    .name = "Roller Blind State",
-    .device_name = "Roller Blind Door",
+    .name = "",
+    .device_name = "",
     .manufacturer = "Sander",
     .model = "RBS1",
     .identifiers = "RBS1",
-    .sw_version = "1.0"};
+    .sw_version = "1.0"
+};
+
+ha_number_param_t ha_rpm_max = {
+    .name = "",
+    .device_name = "",
+    .manufacturer = "Sander",
+    .model = "RBS1",
+    .identifiers = "RBS1",
+    .sw_version = "1.0",
+    .min_value = 30,
+    .max_value = 300,
+    .step = 1,
+    .update_mqtt = ha_cb_number_rpm
+};
 ///////////////////////////////////////
 
 void app_main(void)
@@ -345,9 +374,6 @@ void app_main(void)
 
     // initialize stepper
     stepper_init(&stepper);
-
-    // restore position on boot
-    stepper_set_position(&stepper, settings.roller_pos);
 
     // Initialize NVS.
     esp_err_t error = nvs_flash_init();
@@ -393,8 +419,8 @@ void app_main(void)
         ESP_LOGI("APP", "Partition size: total: %d, used: %d", total, used);
     }
 
+    // init settings
     load_settings(&settings);
-
     print_settings(&settings);
 
     // create defualt event loop
@@ -409,6 +435,9 @@ void app_main(void)
         vTaskDelay(50);
     }
 
+    // restore position on boot
+    stepper_set_position(&stepper, settings.roller_pos);
+
     // create names
     ha_cover.device_name = settings.device_name;
     snprintf(ha_cover.name, sizeof(ha_cover.name), "%s Blind", settings.device_name);
@@ -418,6 +447,8 @@ void app_main(void)
     snprintf(ha_switch_setup_enable.name, sizeof(ha_switch_setup_enable.name), "%s Setup Active", settings.device_name);
     ha_button_setup.device_name = settings.device_name;
     snprintf(ha_button_setup.name, sizeof(ha_button_setup.name), "%s Setup Button", settings.device_name);
+    ha_rpm_max.device_name = settings.device_name;
+    snprintf(ha_rpm_max.name, sizeof(ha_rpm_max.name), "%s RPM Max", settings.device_name);
 
     // create HA components
     subscribe_buffer_t *cover_handle = ha_lib_cover_register(&ha_cover);
@@ -425,6 +456,7 @@ void app_main(void)
     subscribe_buffer_t *switch_handle = ha_lib_switch_register(&ha_switch_setup_enable);
     subscribe_buffer_t *button_handle = ha_lib_button_register(&ha_button_setup);
     //subscribe_buffer_t *text_handle = ha_lib_text_register(&ha_text_status);
+    subscribe_buffer_t *number_handle = ha_lib_number_register(&ha_rpm_max);
 
     ha_lib_init(settings.mqtt_uri, settings.mqtt_user, settings.mqtt_pass);
 
@@ -449,6 +481,9 @@ void app_main(void)
     {
         ha_lib_switch_update(switch_handle_mount, "OFF");
     }
+
+    // update max speed
+    ha_lib_number_update(number_handle, settings.max_speed);
 
     // hold current to 0
     uint32_t data = 0;
@@ -487,13 +522,15 @@ void app_main(void)
             {
                 if (set_cover_state == 1)
                 {
-                    ha_lib_cover_set_position(cover_handle, 100);
+                    //ha_lib_cover_set_position(cover_handle, 100);
+                    ha_lib_cover_set_state(cover_handle, "opening");
                     stepper_go_to_pos(&stepper, settings.max_speed, 0);
                     stepper_moving = 1;
                 }
                 else if (set_cover_state == 2)
                 {
-                    ha_lib_cover_set_position(cover_handle, 0);
+                    //ha_lib_cover_set_position(cover_handle, 0);
+                    ha_lib_cover_set_state(cover_handle, "closing");
                     stepper_go_to_pos(&stepper, settings.max_speed, setup_limit_step);
                     stepper_moving = 2;
                 }
@@ -501,6 +538,7 @@ void app_main(void)
                 {
                     float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
                     ha_lib_cover_set_position(cover_handle, (int)calc_pos);
+                    ha_lib_cover_set_state(cover_handle, "stopped");
                     stepper_stop(&stepper);
                     stepper_moving = 0;
                 }
@@ -520,15 +558,23 @@ void app_main(void)
             if (stepper_moving == 1)
             {
                 ha_lib_cover_set_position(cover_handle, 0);
+                ha_lib_cover_set_state(cover_handle, "open");
             }
             else if (stepper_moving == 2)
             {
                 ha_lib_cover_set_position(cover_handle, 100);
+                ha_lib_cover_set_state(cover_handle, "close");
             }
             else if (stepper_moving == 3)
             {
                 float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
                 ha_lib_cover_set_position(cover_handle, (int)calc_pos);
+                if (calc_pos == 100) {
+                    ha_lib_cover_set_state(cover_handle, "close");
+                }
+                else {
+                    ha_lib_cover_set_state(cover_handle, "open");
+                }
             }
 
             settings.roller_pos = stepper.step_position;

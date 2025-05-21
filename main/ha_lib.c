@@ -81,6 +81,26 @@ static const char *discover_packet_text_sensor = "{"
 "}"
 "}";
 
+static const char *discover_packet_number = "{"
+"\"name\": \"%s\","
+"\"uniq_id\": \"%s\","
+"\"cmd_t\": \"number/%s/set\","
+"\"stat_t\": \"number/%s/state\","
+"\"min\": %d,"
+"\"max\": %d,"
+"\"step\": %d,"
+"\"unit_of_measurement\": \"RPM\","
+"\"avty_t\": \"number/%s/availability\","
+"\"platform\": \"number\","
+"\"device\": {"
+"\"name\": \"%s\","
+"\"manufacturer\": \"%s\","
+"\"model\": \"%s\","
+"\"identifiers\": \"%s\","
+"\"sw_version\": \"%s\""
+"}"
+"}";
+
 static void _create_name(char *buffer, uint16_t buffer_len, char *prepend) {
     static uint8_t increment = 0;
 
@@ -146,6 +166,24 @@ static void _create_discover_packet_text_sensor(char *buffer, uint16_t buffer_le
         param->name,
         unique_id,
         unique_id,
+        unique_id,
+        param->device_name,
+        param->manufacturer,
+        param->model,
+        param->identifiers,
+        param->sw_version
+    );
+}
+
+static void _create_discover_packet_number(char *buffer, uint16_t buffer_len, ha_number_param_t *param, char *unique_id) {
+    snprintf(buffer, buffer_len, discover_packet_number,
+        param->name,
+        unique_id,
+        unique_id,
+        unique_id,
+        param->min_value,
+        param->max_value,
+        param->step,
         unique_id,
         param->device_name,
         param->manufacturer,
@@ -240,6 +278,22 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     snprintf(discover_packet, sizeof(discover_packet), "Idle State");
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
                     break;
+
+                case 0x07:
+                    // subscribe to callbacks
+                    snprintf(buffer, sizeof(buffer), "number/%s/set", _subscribe_buffer[i].unique_id);
+                    esp_mqtt_client_subscribe(client, buffer, 1);
+
+                    // publish discover packet
+                    snprintf(buffer, sizeof(buffer), "homeassistant/number/%s/config", _subscribe_buffer[i].unique_id);
+                    _create_discover_packet_number(discover_packet, sizeof(discover_packet), (ha_number_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
+                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
+
+                    // set state to online
+                    snprintf(buffer, sizeof(buffer), "number/%s/availability", _subscribe_buffer[i].unique_id);
+                    snprintf(discover_packet, sizeof(discover_packet), "online");
+                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
+                    break;
             }
         }
         break;
@@ -299,6 +353,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     snprintf(buffer, sizeof(buffer), "button/%s/press", _subscribe_buffer[i].unique_id);
                     if (memcmp(event->topic, buffer, event->topic_len) == 0) {
                         ha_button_param_t *struct_cover = (ha_button_param_t *)_subscribe_buffer[i].config_struct;
+                        struct_cover->update_mqtt(event->topic, event->data, event->data_len);
+                        break;
+                    }
+
+                    break;
+                
+                case 0x07:
+                    snprintf(buffer, sizeof(buffer), "number/%s/set", _subscribe_buffer[i].unique_id);
+                    if (memcmp(event->topic, buffer, event->topic_len) == 0) {
+                        ha_number_param_t *struct_cover = (ha_number_param_t *)_subscribe_buffer[i].config_struct;
                         struct_cover->update_mqtt(event->topic, event->data, event->data_len);
                         break;
                     }
@@ -390,6 +454,19 @@ subscribe_buffer_t *ha_lib_text_register(ha_text_param_t *param) {
     return ptr;
 }
 
+subscribe_buffer_t *ha_lib_number_register(ha_number_param_t *param) {
+    if (_subsribe_buffer_index >= 8)
+        return NULL;
+
+    _create_name(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "number");
+    _subscribe_buffer[_subsribe_buffer_index].type = 0x07; // new type for number
+    _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
+    _subsribe_buffer_index++;
+
+    return ptr;
+}
+
 void ha_lib_cover_set_state(subscribe_buffer_t *sub_buffer, char *state) {
     char buffer_topic[128];
     char buffer_msg[128];
@@ -422,4 +499,12 @@ void ha_lib_text_sensor_update(subscribe_buffer_t *sensor_buffer, const char *ne
     char topic[128];
     snprintf(topic, sizeof(topic), "sensor/%s/state", sensor_buffer->unique_id);
     esp_mqtt_client_publish(client, topic, new_state, 0, 1, 0);
+}
+
+void ha_lib_number_update(subscribe_buffer_t *number_buffer, int number) {
+    char topic[128];
+    char num_buf[128];
+    snprintf(topic, sizeof(topic), "number/%s/state", number_buffer->unique_id);
+    snprintf(num_buf, sizeof(num_buf), "%d", number);
+    esp_mqtt_client_publish(client, topic, num_buf, 0, 1, 0);
 }
