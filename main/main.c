@@ -19,9 +19,12 @@
 #include "esp_partition.h"
 #include "esp_spiffs.h"
 #include "driver/gptimer.h"
+#include "esp_netif.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+
+#include "lwip/ip_addr.h"
 
 #include "ha_lib.h"
 #include "stp_drv.h"
@@ -106,13 +109,23 @@ static void wifi_task(void *Param)
     esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler, NULL);
 
     // Initialize Wi-Fi including netif with default config
-    esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
 
     // Start Wi-Fi station
     esp_wifi_set_mode(WIFI_MODE_STA);
+
+    if (settings.dhcp_enable == 0) {
+        esp_netif_dhcpc_stop(netif);
+
+        esp_netif_ip_info_t ip = { 0 };
+        ip4addr_aton(settings.ip_address, &ip.ip);
+        ip4addr_aton(settings.netmask, &ip.netmask);
+        ip4addr_aton(settings.gateway, &ip.gw);
+
+        esp_netif_set_ip_info(netif, &ip);
+    }
 
     // build config with ssid and password
     wifi_config_t wifi_config = {0};
