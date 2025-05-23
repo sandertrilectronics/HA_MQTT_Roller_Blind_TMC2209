@@ -67,6 +67,8 @@ typedef struct {
 
 void ha_lib_init(char *mqtt_uri, char *mqtt_user, char *mqtt_pass);
 
+uint8_t ha_lib_mqtt_connected(void);
+
 subscribe_buffer_t *ha_lib_cover_register(ha_cover_param_t *param);
 
 subscribe_buffer_t *ha_lib_switch_register(ha_switch_param_t *param);

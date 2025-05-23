@@ -4,6 +4,9 @@
 #include "esp_mac.h"
 #include "secret.h"
 
+static uint8_t _ha_mqtt_connected = 0;
+static char _ha_lib_id[32] = {0};
+
 static const char *discover_packet_cover = "{"
 "\"name\": \"%s\","
 "\"cmd_t\": \"cover/%s/set\","
@@ -30,7 +33,7 @@ static const char *discover_packet_cover = "{"
 "\"name\": \"%s\","
 "\"manufacturer\": \"%s\","
 "\"model\": \"%s\","
-"\"identifiers\": \"%s\","
+"\"identifiers\": \"%s_%s\","
 "\"sw_version\": \"%s\""
 "}"
 "}";
@@ -46,7 +49,7 @@ static const char *discover_packet_switch = "{"
 "\"name\": \"%s\","
 "\"manufacturer\": \"%s\","
 "\"model\": \"%s\","
-"\"identifiers\": \"%s\","
+"\"identifiers\": \"%s_%s\","
 "\"sw_version\": \"%s\""
 "}"
 "}";
@@ -61,7 +64,7 @@ static const char *discover_packet_button = "{"
 "\"name\": \"%s\","
 "\"manufacturer\": \"%s\","
 "\"model\": \"%s\","
-"\"identifiers\": \"%s\","
+"\"identifiers\": \"%s_%s\","
 "\"sw_version\": \"%s\""
 "}"
 "}";
@@ -76,7 +79,7 @@ static const char *discover_packet_text_sensor = "{"
 "\"name\": \"%s\","
 "\"manufacturer\": \"%s\","
 "\"model\": \"%s\","
-"\"identifiers\": \"%s\","
+"\"identifiers\": \"%s_%s\","
 "\"sw_version\": \"%s\""
 "}"
 "}";
@@ -96,12 +99,12 @@ static const char *discover_packet_number = "{"
 "\"name\": \"%s\","
 "\"manufacturer\": \"%s\","
 "\"model\": \"%s\","
-"\"identifiers\": \"%s\","
+"\"identifiers\": \"%s_%s\","
 "\"sw_version\": \"%s\""
 "}"
 "}";
 
-static void _create_name(char *buffer, uint16_t buffer_len, char *prepend) {
+static void _create_unique_id(char *buffer, uint16_t buffer_len, char *prepend) {
     static uint8_t increment = 0;
 
     // get mac address
@@ -110,6 +113,20 @@ static void _create_name(char *buffer, uint16_t buffer_len, char *prepend) {
 
     // fill static setings in air quality data (aqd)
     snprintf(buffer, buffer_len, "%s_%02x%02x%02x%02x%02x%02x%02x", prepend, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], increment);
+
+    // randomize
+    increment++;
+}
+
+static void _create_id(char *buffer, uint16_t buffer_len) {
+    static uint8_t increment = 0;
+
+    // get mac address
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    // fill static setings in air quality data (aqd)
+    snprintf(buffer, buffer_len, "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     // randomize
     increment++;
@@ -128,6 +145,7 @@ static void _create_discover_packet_cover(char *buffer, uint16_t buffer_len, ha_
         param->manufacturer,
         param->model,
         param->identifiers,
+        _ha_lib_id,
         param->sw_version
     );
 }
@@ -143,6 +161,7 @@ static void _create_discover_packet_switch(char *buffer, uint16_t buffer_len, ha
         param->manufacturer,
         param->model,
         param->identifiers,
+        _ha_lib_id,
         param->sw_version
     );
 }
@@ -157,6 +176,7 @@ static void _create_discover_packet_button(char *buffer, uint16_t buffer_len, ha
         param->manufacturer,
         param->model,
         param->identifiers,
+        _ha_lib_id,
         param->sw_version
     );
 }
@@ -171,6 +191,7 @@ static void _create_discover_packet_text_sensor(char *buffer, uint16_t buffer_le
         param->manufacturer,
         param->model,
         param->identifiers,
+        _ha_lib_id,
         param->sw_version
     );
 }
@@ -189,6 +210,7 @@ static void _create_discover_packet_number(char *buffer, uint16_t buffer_len, ha
         param->manufacturer,
         param->model,
         param->identifiers,
+        _ha_lib_id,
         param->sw_version
     );
 }
@@ -201,12 +223,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     ESP_LOGD("MQTT", "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
     esp_mqtt_event_handle_t event = event_data;
     esp_mqtt_client_handle_t client = event->client;
-    char buffer[128];
+    char buffer[256];
     char discover_packet[1024];
     switch ((esp_mqtt_event_id_t)event_id)
     {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI("MQTT", "MQTT_EVENT_CONNECTED");
+
+        _ha_mqtt_connected = 1;
     
         for (uint8_t i = 0; i < _subsribe_buffer_index; i++) {
             switch (_subscribe_buffer[i].type) {
@@ -218,7 +242,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     //esp_mqtt_client_subscribe(client, buffer, 1);
 
                     // publish discover packet
-                    snprintf(buffer, sizeof(buffer), "homeassistant/cover/%s/config", _subscribe_buffer[i].unique_id);
+                    snprintf(buffer, sizeof(buffer), "homeassistant/cover/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_cover(discover_packet, sizeof(discover_packet), (ha_cover_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
 
@@ -236,7 +260,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     //esp_mqtt_client_subscribe(client, buffer, 1);
 
                     // publish discover packet
-                    snprintf(buffer, sizeof(buffer), "homeassistant/switch/%s/config", _subscribe_buffer[i].unique_id);
+                    snprintf(buffer, sizeof(buffer), "homeassistant/switch/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_switch(discover_packet, sizeof(discover_packet), (ha_switch_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
 
@@ -252,7 +276,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     esp_mqtt_client_subscribe(client, buffer, 1);
 
                     // publish discover packet
-                    snprintf(buffer, sizeof(buffer), "homeassistant/button/%s/config", _subscribe_buffer[i].unique_id);
+                    snprintf(buffer, sizeof(buffer), "homeassistant/button/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_button(discover_packet, sizeof(discover_packet), (ha_button_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
 
@@ -264,7 +288,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
                 case 0x06:
                     // publish discover packet
-                    snprintf(buffer, sizeof(buffer), "homeassistant/sensor/%s/config", _subscribe_buffer[i].unique_id);
+                    snprintf(buffer, sizeof(buffer), "homeassistant/sensor/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_text_sensor(discover_packet, sizeof(discover_packet), (ha_text_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
 
@@ -285,7 +309,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     esp_mqtt_client_subscribe(client, buffer, 1);
 
                     // publish discover packet
-                    snprintf(buffer, sizeof(buffer), "homeassistant/number/%s/config", _subscribe_buffer[i].unique_id);
+                    snprintf(buffer, sizeof(buffer), "homeassistant/number/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_number(discover_packet, sizeof(discover_packet), (ha_number_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
 
@@ -299,6 +323,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI("MQTT", "MQTT_EVENT_DISCONNECTED");
+        _ha_mqtt_connected = 0;
         break;
 
     case MQTT_EVENT_SUBSCRIBED:
@@ -387,23 +412,31 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 static esp_mqtt_client_handle_t client = NULL;
 
 void ha_lib_init(char *mqtt_uri, char *mqtt_user, char *mqtt_pass) {
+    // configure client
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = mqtt_uri,
         .credentials.username = mqtt_user,
         .credentials.authentication.password = mqtt_pass
     };
-
     client = esp_mqtt_client_init(&mqtt_cfg);
-    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
+    
+    // start mqtt client
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(client);
+
+    // create device id
+    _create_id(_ha_lib_id, sizeof(_ha_lib_id));
+}
+
+uint8_t ha_lib_mqtt_connected(void) {
+    return _ha_mqtt_connected;
 }
 
 subscribe_buffer_t *ha_lib_cover_register(ha_cover_param_t *param) {
     if (_subsribe_buffer_index >= 8)
         return NULL;
 
-    _create_name(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "cover");
+    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "cover");
     _subscribe_buffer[_subsribe_buffer_index].type = 0x03;
     _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
     subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
@@ -417,7 +450,7 @@ subscribe_buffer_t *ha_lib_switch_register(ha_switch_param_t *param) {
     if (_subsribe_buffer_index >= 8)
         return NULL;
 
-    _create_name(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "switch");
+    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "switch");
     _subscribe_buffer[_subsribe_buffer_index].type = 0x04;
     _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
     subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
@@ -431,7 +464,7 @@ subscribe_buffer_t *ha_lib_button_register(ha_button_param_t *param) {
     if (_subsribe_buffer_index >= 8)
         return NULL;
 
-    _create_name(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "button");
+    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "button");
     _subscribe_buffer[_subsribe_buffer_index].type = 0x05;
     _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
     subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
@@ -445,7 +478,7 @@ subscribe_buffer_t *ha_lib_text_register(ha_text_param_t *param) {
     if (_subsribe_buffer_index >= 8)
         return NULL;
 
-    _create_name(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "text");
+    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "text");
     _subscribe_buffer[_subsribe_buffer_index].type = 0x06;
     _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
     subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
@@ -458,7 +491,7 @@ subscribe_buffer_t *ha_lib_number_register(ha_number_param_t *param) {
     if (_subsribe_buffer_index >= 8)
         return NULL;
 
-    _create_name(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "number");
+    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "number");
     _subscribe_buffer[_subsribe_buffer_index].type = 0x07; // new type for number
     _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
     subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
