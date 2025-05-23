@@ -16,7 +16,6 @@ uint32_t system_uptime_ms(void)
 }
 
 //-----------------------------------------------------------------------------
-char auth_buffer[512];
 const char ota_html_file[] = "\
 <style>\n\
 .progress {margin: 15px auto;  max-width: 500px;height: 30px;}\n\
@@ -218,9 +217,20 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 {
     const char *html = 
         "<!DOCTYPE html>"
+        "<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/2.2.1/css/bootstrap.min.css\">"
         "<html><head><title>Device Settings</title>"
         "<script>"
         "async function loadSettings() {"
+        "document.getElementById('rebootBtn').addEventListener('click', () => {"
+        "if (confirm('Are you sure you want to reboot the device?')) {"
+        "fetch('/api/reboot', { method: 'POST' })"
+        ".then(response => {"
+        "if (response.ok) { alert('Reboot initiated!'); }"
+        "else { alert('Failed to reboot.'); }"
+        "})"
+        ".catch(() => alert('Error sending reboot request.'));"
+        "}"
+        "});"
         "const response = await fetch('/api/settings');"
         "if (response.ok) {"
         "const data = await response.json();"
@@ -260,19 +270,20 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         "</head><body>"
         "<h1>Device Configuration</h1>"
         "<form onsubmit='event.preventDefault(); saveSettings();'>"
-        "<label>IP Address: <input type='text' id='ip_address'></label><br>"
-        "<label>Gateway: <input type='text' id='gateway'></label><br>"
-        "<label>Netmask: <input type='text' id='netmask'></label><br>"
+        "<label>IP Address: <input type='text' id='ip_address' pattern=\"^(?>(\\d|[1-9]\\d{2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(?1)$\"></label><br>"
+        "<label>Gateway: <input type='text' id='gateway' pattern=\"^(?>(\\d|[1-9]\\d{2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(?1)$\"></label><br>"
+        "<label>Netmask: <input type='text' id='netmask' pattern=\"^(?>(\\d|[1-9]\\d{2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(?1)$\"></label><br>"
         "<label>DHCP Enable: <input type='checkbox' id='dhcp_enable'></label><br>"
         "<label>Direction Invert: <input type='checkbox' id='dir_invert'></label><br>"
         "<label>Max Speed: <input type='number' id='max_speed'></label><br>"
-        "<h2>MQTT Settings</h2>"
         "<label>MQTT URI: <input type='text' id='mqtt_uri'></label><br>"
         "<label>MQTT User: <input type='text' id='mqtt_user'></label><br>"
         "<label>MQTT Pass: <input type='password' id='mqtt_pass'></label><br>"
         "<label>Device Name: <input type='text' id='device_name'></label><br>"
         "<button type='submit'>Save Settings</button>"
-        "</form></body></html>";
+        "</form>"
+        "<button id='rebootBtn'>Reboot Device</button>"
+        "</body></html>";
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
@@ -392,6 +403,22 @@ static esp_err_t api_post_settings_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t api_reboot_handler(httpd_req_t *req)
+{
+    // Respond immediately
+    httpd_resp_set_status(req, "200 OK");
+    const char *resp = "{\"status\":\"rebooting\"}";
+    httpd_resp_send(req, resp, strlen(resp));
+
+    // Wait briefly to ensure response is sent
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Restart the ESP device
+    esp_restart();
+
+    return ESP_OK;
+}
+
 //-----------------------------------------------------------------------------
 httpd_handle_t start_webserver(void)
 {
@@ -426,6 +453,13 @@ httpd_handle_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &api_post_uri);
 
+        static httpd_uri_t reboot_uri = {
+            .uri = "/api/reboot",
+            .method = HTTP_POST,
+            .handler = api_reboot_handler,
+        };
+        httpd_register_uri_handler(server, &reboot_uri);
+
         static const httpd_uri_t ota_post =
             {
                 .uri = "/ota",
@@ -441,22 +475,6 @@ httpd_handle_t start_webserver(void)
                 .handler = ota_get_handler,
             };
         httpd_register_uri_handler(server, &ota_get);
-
-        static httpd_uri_t reset_post =
-            {
-                .uri = "/reset",
-                .method = HTTP_POST,
-                .handler = reset_post_handler,
-            };
-        httpd_register_uri_handler(server, &reset_post);
-
-        static httpd_uri_t reset_get =
-            {
-                .uri = "/reset",
-                .method = HTTP_GET,
-                .handler = reset_get_handler,
-            };
-        httpd_register_uri_handler(server, &reset_get);
     }
 
     return NULL;
