@@ -4,10 +4,7 @@
 #include "esp_log.h"
 #include <math.h>
 
-#define RPM_MAX         300
-#define STEP_PER_RPM    (200 * 8)
-
-#define RPM_TO_PERIOD(rpm) ((CLOCK_PWM) / ((rpm / 60) * STEP_PER_RPM))
+#define RPM_TO_PERIOD(rpm) ((CLOCK_PWM) / ((rpm / 60) * STP_STEP_PER_RPM))
 
 #define S_CURVE_FLEX    3
 
@@ -42,7 +39,7 @@ static void CalculateSModelLine(uint16_t period[], float len, float fre_max, flo
         deno = 1.0 / (1 + expf(-melo)); // expf is a library function of exponential(e)
         fre = delt * deno + fre_min;
         fre /= 60;
-        fre *= STEP_PER_RPM;
+        fre *= STP_STEP_PER_RPM;
         period[i] = (uint16_t)fre;
     }
 }
@@ -80,7 +77,7 @@ static void stepper_handle(tmc2209_io_t *stp)
         ESP_LOGI("STP", "%d %d %d", (int)stp->step_target, (int)stp->step_position, step_target_offset);
 
         // nearing the end of our movement?
-        if (step_target_offset < 1600) {
+        if (step_target_offset < (stp->rpm_set * 25)) {
             // first time since start? Happens for small steps
             if (stp->duty_set == 0) {
                 stp->duty_set = 800;
@@ -109,23 +106,33 @@ static void stepper_handle(tmc2209_io_t *stp)
         {
             // first time since start?
             if (stp->duty_set == 0) {
-                // calculate s cruve
-                CalculateSModelLine(stp->s_cruve_arr, stp->s_curve_steps + 1, stp->rpm_set, 30, S_CURVE_FLEX);
-
                 // set dir
                 if (!stp->dir_invert)
                     gpio_set_level(stp->dir, stp->dir_set);
                 else
                     gpio_set_level(stp->dir, !stp->dir_set);
 
-                // set timer
-                stp->duty_set = stp->s_cruve_arr[stp->s_cruve_index] - 1;
+                // direct start?
+                if (stp->s_curve_steps == 1) {
+                    stp->duty_set = stp->rpm_set * STP_STEP_PER_RPM / 60;
+                }
+                // not direct start
+                else {
+                    // calculate s cruve
+                    CalculateSModelLine(stp->s_cruve_arr, stp->s_curve_steps + 1, stp->rpm_set, 30, S_CURVE_FLEX);
+
+                    // set duty cycle
+                    stp->duty_set = stp->s_cruve_arr[stp->s_cruve_index] - 1;
+                }
+                
+                // start timer
                 stp->alarm_config.alarm_count = 1000000 / stp->duty_set;
                 stp->alarm_config.flags.auto_reload_on_alarm = true;
                 gptimer_set_alarm_action(stp->gptimer, &stp->alarm_config);
                 gptimer_start(stp->gptimer);
                 ESP_LOGI("SYS", "Duty set to %d", (int)stp->duty_set);
 
+                // increment start curve
                 stp->s_cruve_index++;
             }       
             // speeding up
@@ -227,20 +234,30 @@ void stepper_go_to_pos(tmc2209_io_t *stp, uint32_t rpm_set, int32_t position)
     if (position == stp->step_position)
         return;
 
-    if (rpm_set > RPM_MAX)
-        rpm_set = RPM_MAX;
+    // higher rpm?
+    if (rpm_set > STP_RPM_MAX)
+        rpm_set = STP_RPM_MAX;
 
-    stp->s_curve_steps = rpm_set / 5;
-    if (stp->s_curve_steps > S_CURVE_ARR_LEN - 1)
-        stp->s_curve_steps = S_CURVE_ARR_LEN - 1;
-    if (stp->s_curve_steps < 2)
-        stp->s_curve_steps = 2;
+    // start without curve?
+    if (rpm_set <= STP_RPM_DIRECT) {
+        stp->s_curve_steps = 1;
+    }
+    // start with cruve
+    else {
+        stp->s_curve_steps = rpm_set / 5;
+        if (stp->s_curve_steps > S_CURVE_ARR_LEN - 1)
+            stp->s_curve_steps = S_CURVE_ARR_LEN - 1;
+        if (stp->s_curve_steps < 2)
+            stp->s_curve_steps = 2;
+    }
 
+    // set start variables
     stp->step_target = position;
     stp->rpm_set = rpm_set;
     stp->s_cruve_index = 0;
     stp->duty_set = 0;
 
+    // which direction?
     if (stp->step_position < stp->step_target) 
         stp->dir_set = 0;
     else
@@ -249,11 +266,23 @@ void stepper_go_to_pos(tmc2209_io_t *stp, uint32_t rpm_set, int32_t position)
 
 void stepper_stop(tmc2209_io_t *stp)
 {
-    if (stp->duty_set) {
+    // not active?
+    if (!stp->duty_set)
+        return;
+
+    // low rpm?
+    if (stp->rpm_set < STP_RPM_DIRECT) {
         if (stp->dir_set)
-            stp->step_target = stp->step_position - 1600;
+            stp->step_target = stp->step_position - 1;
         else
-            stp->step_target = stp->step_position + 1600;
+            stp->step_target = stp->step_position + 1;
+    }
+    // not low rpm
+    else {
+        if (stp->dir_set)
+            stp->step_target = stp->step_position - (stp->rpm_set * 25);
+        else
+            stp->step_target = stp->step_position + (stp->rpm_set * 25);
     }
 }
 

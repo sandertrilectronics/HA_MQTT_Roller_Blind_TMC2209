@@ -5,7 +5,11 @@
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 
-#define S_CURVE_ARR_LEN     (300/5)
+#define STP_RPM_MAX         300
+#define STP_RPM_DIRECT      30
+#define STP_STEP_PER_RPM    (200 * 8)
+
+#define S_CURVE_ARR_LEN     (STP_RPM_MAX / 5)
 
 typedef struct
 {

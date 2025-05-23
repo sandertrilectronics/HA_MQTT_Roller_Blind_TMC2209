@@ -116,10 +116,11 @@ static void wifi_task(void *Param)
     // Start Wi-Fi station
     esp_wifi_set_mode(WIFI_MODE_STA);
 
-    if (settings.dhcp_enable == 0) {
+    if (settings.dhcp_enable == 0)
+    {
         esp_netif_dhcpc_stop(netif);
 
-        esp_netif_ip_info_t ip = { 0 };
+        esp_netif_ip_info_t ip = {0};
         ip4addr_aton(settings.ip_address, &ip.ip);
         ip4addr_aton(settings.netmask, &ip.netmask);
         ip4addr_aton(settings.gateway, &ip.gw);
@@ -233,6 +234,7 @@ uint8_t set_cover_state = 0;
 uint8_t set_switch_mount = 0;
 uint8_t set_switch_setup = 0;
 uint8_t set_button_setup = 0;
+uint8_t set_rpm_max = 0;
 
 void ha_cb_cover_update(char *topic, char *data, int data_len)
 {
@@ -305,6 +307,7 @@ void ha_cb_number_rpm(char *topic, char *data, int data_len)
         if (rpm >= 30 && rpm <= 300)
         {
             settings.max_speed = rpm;
+            set_rpm_max = 1;
         }
     }
 }
@@ -351,8 +354,7 @@ ha_text_param_t ha_text_status = {
     .manufacturer = "Sander",
     .model = "RBS1",
     .identifiers = "RBS1",
-    .sw_version = "1.0"
-};
+    .sw_version = "1.0"};
 
 ha_number_param_t ha_rpm_max = {
     .name = "",
@@ -364,8 +366,18 @@ ha_number_param_t ha_rpm_max = {
     .min_value = 30,
     .max_value = 300,
     .step = 1,
-    .update_mqtt = ha_cb_number_rpm
-};
+    .update_mqtt = ha_cb_number_rpm};
+
+typedef enum
+{
+    STP_SETUP_NONE,
+    STP_SETUP_DOWN_FAST,
+    STP_SETUP_DOWN_SLOW,
+    STP_SETUP_DOWN_STOP,
+    STP_SETUP_UP_FAST,
+    STP_SETUP_UP_SLOW,
+    STP_SETUP_UP_STOP,
+} stp_setup_state_t;
 ///////////////////////////////////////
 
 void app_main(void)
@@ -468,14 +480,16 @@ void app_main(void)
     subscribe_buffer_t *switch_handle_mount = ha_lib_switch_register(&ha_switch_mount);
     subscribe_buffer_t *switch_handle = ha_lib_switch_register(&ha_switch_setup_enable);
     subscribe_buffer_t *button_handle = ha_lib_button_register(&ha_button_setup);
-    //subscribe_buffer_t *text_handle = ha_lib_text_register(&ha_text_status);
+    // subscribe_buffer_t *text_handle = ha_lib_text_register(&ha_text_status);
     subscribe_buffer_t *number_handle = ha_lib_number_register(&ha_rpm_max);
 
+    // connect to mqtt
     ha_lib_init(settings.mqtt_uri, settings.mqtt_user, settings.mqtt_pass);
 
-    vTaskDelay(100);
-
-#warning check mqtt connection before sending states
+    // wait for connection
+    while (!ha_lib_mqtt_connected()) {
+        vTaskDelay(50);
+    }
 
     // setup switch is off
     ha_lib_switch_update(switch_handle, "OFF");
@@ -518,7 +532,7 @@ void app_main(void)
     ret = stepper_write_reg(&stepper, 0x70, data);
     ESP_LOGI("SYS", "STP %d %08x", ret, (unsigned int)data);
 
-    uint8_t setup_active_state = 0;
+    stp_setup_state_t setup_active_state = STP_SETUP_NONE;
     int32_t setup_limit_step = settings.roller_limit;
     uint8_t stepper_moving = 0;
 
@@ -531,35 +545,36 @@ void app_main(void)
             ESP_LOGI("MAIN", "set_cover_state changed to %d\n", set_cover_state);
 
             // setup not active?
-            if (!setup_active_state && stepper_ready(&stepper))
+            if (setup_active_state == STP_SETUP_NONE)
             {
                 if (set_cover_state == 1)
                 {
-                    //ha_lib_cover_set_position(cover_handle, 100);
-                    ha_lib_cover_set_state(cover_handle, "opening");
-                    stepper_go_to_pos(&stepper, settings.max_speed, 0);
-                    stepper_moving = 1;
+                    if (stepper_ready(&stepper))
+                    {
+                        ha_lib_cover_set_state(cover_handle, "opening");
+                        stepper_go_to_pos(&stepper, settings.max_speed, 0);
+                        stepper_moving = 1;
+                    }
                 }
                 else if (set_cover_state == 2)
                 {
-                    //ha_lib_cover_set_position(cover_handle, 0);
-                    ha_lib_cover_set_state(cover_handle, "closing");
-                    stepper_go_to_pos(&stepper, settings.max_speed, setup_limit_step);
-                    stepper_moving = 2;
+                    if (stepper_ready(&stepper))
+                    {
+                        ha_lib_cover_set_state(cover_handle, "closing");
+                        stepper_go_to_pos(&stepper, settings.max_speed, setup_limit_step);
+                        stepper_moving = 2;
+                    }
                 }
                 else if (set_cover_state == 3)
                 {
-                    float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
-                    ha_lib_cover_set_position(cover_handle, (int)calc_pos);
-                    ha_lib_cover_set_state(cover_handle, "stopped");
                     stepper_stop(&stepper);
-                    stepper_moving = 0;
+                    stepper_moving = 3;
                 }
                 else if (set_cover_state >= 100)
                 {
                     int calc_pos = setup_limit_step * (set_cover_state - 100) / 100;
                     stepper_go_to_pos(&stepper, settings.max_speed, calc_pos);
-                    stepper_moving = 3;
+                    stepper_moving = 4;
                 }
             }
 
@@ -582,10 +597,18 @@ void app_main(void)
             {
                 float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
                 ha_lib_cover_set_position(cover_handle, (int)calc_pos);
-                if (calc_pos == 100) {
+                ha_lib_cover_set_state(cover_handle, "stopped");
+            }
+            else if (stepper_moving == 4)
+            {
+                float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
+                ha_lib_cover_set_position(cover_handle, (int)calc_pos);
+                if (calc_pos == 100)
+                {
                     ha_lib_cover_set_state(cover_handle, "close");
                 }
-                else {
+                else
+                {
                     ha_lib_cover_set_state(cover_handle, "open");
                 }
             }
@@ -622,12 +645,12 @@ void app_main(void)
             if (set_switch_setup == 1)
             {
                 stepper_stop(&stepper);
-                setup_active_state = 0;
+                setup_active_state = STP_SETUP_NONE;
                 ha_lib_switch_update(switch_handle, "OFF");
             }
             else if (set_switch_setup == 2)
             {
-                setup_active_state = 1;
+                setup_active_state = STP_SETUP_DOWN_FAST;
                 ha_lib_switch_update(switch_handle, "ON");
             }
             set_switch_setup = 0;
@@ -641,20 +664,34 @@ void app_main(void)
                 // setup active?
                 switch (setup_active_state)
                 {
-                case 1:
+                case STP_SETUP_DOWN_FAST:
                     stepper_go_to_pos(&stepper, settings.max_speed, 16777215);
-                    setup_active_state++;
+                    setup_active_state = STP_SETUP_DOWN_SLOW;
                     break;
-                case 2:
+                case STP_SETUP_DOWN_SLOW:
                     stepper_stop(&stepper);
-                    setup_active_state++;
+                    while (!stepper_ready(&stepper)) {vTaskDelay(10);}
+                    vTaskDelay(10);
+                    stepper_go_to_pos(&stepper, 30, 16777215);
+                    setup_active_state = STP_SETUP_DOWN_STOP;
                     break;
-                case 3:
+                case STP_SETUP_DOWN_STOP:
+                    stepper_stop(&stepper);
+                    setup_active_state = STP_SETUP_UP_FAST;
+                    break;
+                case STP_SETUP_UP_FAST:
                     setup_limit_step = stepper.step_position;
                     stepper_go_to_pos(&stepper, settings.max_speed, -16777215);
-                    setup_active_state++;
+                    setup_active_state = STP_SETUP_UP_SLOW;
                     break;
-                case 4:
+                case STP_SETUP_UP_SLOW:
+                    stepper_stop(&stepper);
+                    while (!stepper_ready(&stepper)) {vTaskDelay(10);}
+                    vTaskDelay(10);
+                    stepper_go_to_pos(&stepper, 30, -16777215);
+                    setup_active_state = STP_SETUP_UP_STOP;
+                    break;
+                case STP_SETUP_UP_STOP:
                     stepper_stop(&stepper);
                     vTaskDelay(200);
                     setup_limit_step -= stepper.step_position;
@@ -664,16 +701,23 @@ void app_main(void)
                     stepper_set_position(&stepper, 0);
 
                     ha_lib_switch_update(switch_handle, "OFF");
-                    setup_active_state = 0;
+                    setup_active_state = STP_SETUP_NONE;
 
                     settings.roller_limit = setup_limit_step;
                     settings.roller_pos = 0;
                     save_settings(&settings);
 
                     break;
+                default:
+                    break;
                 }
             }
             set_button_setup = 0;
+        }
+
+        if (set_rpm_max) {
+            ha_lib_number_update(number_handle, settings.max_speed);
+            set_rpm_max = 0;
         }
     }
 }
