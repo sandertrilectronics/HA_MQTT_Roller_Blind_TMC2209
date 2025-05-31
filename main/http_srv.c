@@ -8,65 +8,10 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-//-----------------------------------------------------------------------------
-uint32_t system_uptime_ms(void)
-{
-    // esp_timer_get_time returns time in uSec
-    return xTaskGetTickCount();
-}
+#define DEBUG_BUF_SIZE      2048
 
-//-----------------------------------------------------------------------------
-const char ota_html_file[] = "\
-<style>\n\
-.progress {margin: 15px auto;  max-width: 500px;height: 30px;}\n\
-.progress .progress__bar {\n\
-  height: 100%; width: 1%; border-radius: 15px;\n\
-  background: repeating-linear-gradient(135deg,#336ffc,#036ffc 15px,#1163cf 15px,#1163cf 30px); }\n\
- .status {font-weight: bold; font-size: 30px;};\n\
-</style>\n\
-<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/2.2.1/css/bootstrap.min.css\">\n\
-<div class=\"well\" style=\"text-align: center;\">\n\
-  <div class=\"btn\" onclick=\"file_sel.click();\"><i class=\"icon-upload\" style=\"padding-right: 5px;\"></i>Upload Firmware</div>\n\
-  <div class=\"progress\"><div class=\"progress__bar\" id=\"progress\"></div></div>\n\
-  <div class=\"status\" id=\"status_div\"></div>\n\
-</div>\n\
-<input type=\"file\" id=\"file_sel\" onchange=\"upload_file()\" style=\"display: none;\">\n\
-<script>\n\
-function upload_file() {\n\
-  document.getElementById(\"status_div\").innerHTML = \"Upload in progress\";\n\
-  let data = document.getElementById(\"file_sel\").files[0];\n\
-  xhr = new XMLHttpRequest();\n\
-  xhr.open(\"POST\", \"/ota\", true);\n\
-  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');\n\
-  xhr.upload.addEventListener(\"progress\", function (event) {\n\
-     if (event.lengthComputable) {\n\
-    	 document.getElementById(\"progress\").style.width = (event.loaded / event.total) * 100 + \"%\";\n\
-     }\n\
-  });\n\
-  xhr.onreadystatechange = function () {\n\
-    if(xhr.readyState === XMLHttpRequest.DONE) {\n\
-      var status = xhr.status;\n\
-      if (status >= 200 && status < 400)\n\
-      {\n\
-        document.getElementById(\"status_div\").innerHTML = \"Upload accepted. Device will reboot.\";\n\
-      } else {\n\
-        document.getElementById(\"status_div\").innerHTML = \"Upload rejected!\";\n\
-      }\n\
-    }\n\
-  };\n\
-  xhr.send(data);\n\
-  return false;\n\
-}\n\
-</script>";
-
-//-----------------------------------------------------------------------------
-static esp_err_t ota_get_handler(httpd_req_t *req)
-{
-    httpd_resp_set_status(req, HTTPD_200);
-    httpd_resp_set_hdr(req, "Connection", "keep-alive");
-    httpd_resp_send(req, ota_html_file, strlen(ota_html_file));
-    return ESP_OK;
-}
+static vprintf_like_t debug_root_func;
+static char debug_buf[DEBUG_BUF_SIZE] = {0};
 
 //-----------------------------------------------------------------------------
 static esp_err_t ota_post_handler(httpd_req_t *req)
@@ -151,61 +96,6 @@ return_failure:
 }
 
 //-----------------------------------------------------------------------------
-const char reset_html_file[] = "\
-<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/2.2.1/css/bootstrap.min.css\">\n\
-<div class=\"well\" style=\"text-align: center;\">\n\
-  <div class=\"btn\" onclick=\"reset_btn.click();\"><i class=\"icon-wrench\" style=\"padding-right: 5px;\"></i>Reset Device</div>\n\
-  <div class=\"status\" id=\"status_div\"></div>\n\
-</div>\n\
-<input type=\"button\" id=\"reset_btn\" onclick=\"reset_device()\" style=\"display: none;\">\n\
-<script>\n\
-function reset_device() {\n\
-  document.getElementById(\"status_div\").innerHTML = \"Resetting Device...\";\n\
-  xhr = new XMLHttpRequest();\n\
-  xhr.open(\"POST\", \"/reset\", true);\n\
-  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');\n\
-  xhr.onreadystatechange = function () {\n\
-    if(xhr.readyState === XMLHttpRequest.DONE) {\n\
-      var status = xhr.status;\n\
-      if (status >= 200 && status < 400)\n\
-      {\n\
-        document.getElementById(\"status_div\").innerHTML = \"Device is rebooting, reload this page.\";\n\
-      } else {\n\
-        document.getElementById(\"status_div\").innerHTML = \"Device did NOT reboot?!\";\n\
-      }\n\
-    }\n\
-  };\n\
-  xhr.send("
-                               ");\n\
-  return false;\n\
-}\n\
-</script>";
-
-//-----------------------------------------------------------------------------
-static esp_err_t reset_post_handler(httpd_req_t *req)
-{
-    printf("Rebooting\n");
-    fflush(stdout);
-
-    httpd_resp_set_status(req, HTTPD_200);
-    httpd_resp_send(req, NULL, 0);
-
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
-    esp_restart();
-
-    return ESP_OK;
-}
-
-//-----------------------------------------------------------------------------
-static esp_err_t reset_get_handler(httpd_req_t *req)
-{
-    httpd_resp_set_status(req, HTTPD_200);
-    httpd_resp_set_hdr(req, "Connection", "keep-alive");
-    httpd_resp_send(req, reset_html_file, strlen(reset_html_file));
-    return ESP_OK;
-}
-
-//-----------------------------------------------------------------------------
 static esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
 {
     httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "404 error");
@@ -213,78 +103,156 @@ static esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
 }
 
 //-----------------------------------------------------------------------------
+const char html[] = 
+"<!DOCTYPE html>\n"
+"<html>\n"
+"<head>\n"
+"<title>Device Settings</title>\n"
+"<link rel=\"stylesheet\" href=\"https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css\" "
+"integrity=\"sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T\" crossorigin=\"anonymous\">\n"
+"<script>\n"
+"async function loadSettings() {\n"
+"  document.getElementById('rebootBtn').addEventListener('click', () => {\n"
+"    if (confirm('Are you sure you want to reboot the device?')) {\n"
+"      fetch('/api/reboot', { method: 'POST' })\n"
+"        .then(response => {\n"
+"          if (response.ok) {\n"
+"            alert('Reboot initiated!');\n"
+"          } else {\n"
+"            alert('Failed to reboot.');\n"
+"          }\n"
+"        })\n"
+"        .catch(() => alert('Error sending reboot request.'));\n"
+"    }\n"
+"  });\n"
+"  const response = await fetch('/api/settings');\n"
+"  if (response.ok) {\n"
+"    const data = await response.json();\n"
+"    document.getElementById('ip_address').value = data.ip_address;\n"
+"    document.getElementById('gateway').value = data.gateway;\n"
+"    document.getElementById('netmask').value = data.netmask;\n"
+"    document.getElementById('dhcp_enable').checked = data.dhcp_enable;\n"
+"    document.getElementById('dir_invert').checked = data.dir_invert;\n"
+"    document.getElementById('max_speed').value = data.max_speed;\n"
+"    document.getElementById('mqtt_uri').value = data.mqtt_uri;\n"
+"    document.getElementById('mqtt_user').value = data.mqtt_user;\n"
+"    document.getElementById('mqtt_pass').value = data.mqtt_pass;\n"
+"    document.getElementById('device_name').value = data.device_name;\n"
+"  }\n"
+"  setInterval(debug_poll, 1000);\n"
+"}\n"
+"\n"
+"async function saveSettings() {\n"
+"  const data = {\n"
+"    ip_address: document.getElementById('ip_address').value,\n"
+"    gateway: document.getElementById('gateway').value,\n"
+"    netmask: document.getElementById('netmask').value,\n"
+"    dhcp_enable: document.getElementById('dhcp_enable').checked,\n"
+"    dir_invert: document.getElementById('dir_invert').checked,\n"
+"    max_speed: parseInt(document.getElementById('max_speed').value),\n"
+"    mqtt_uri: document.getElementById('mqtt_uri').value,\n"
+"    mqtt_user: document.getElementById('mqtt_user').value,\n"
+"    mqtt_pass: document.getElementById('mqtt_pass').value,\n"
+"    device_name: document.getElementById('device_name').value\n"
+"  };\n"
+"  const response = await fetch('/api/settings', {\n"
+"    method: 'POST',\n"
+"    headers: { 'Content-Type': 'application/json' },\n"
+"    body: JSON.stringify(data)\n"
+"  });\n"
+"  if (response.ok) {\n"
+"    alert('Settings saved!');\n"
+"  } else {\n"
+"    alert('Failed to save');\n"
+"  }\n"
+"}\n"
+"\n"
+"function upload_file() {\n"
+"  document.getElementById(\"status_div\").innerHTML = \"Upload in progress\";\n"
+"  let data = document.getElementById(\"file_sel\").files[0];\n"
+"  const xhr = new XMLHttpRequest();\n"
+"  xhr.open(\"POST\", \"/ota\", true);\n"
+"  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');\n"
+"  xhr.upload.addEventListener(\"progress\", function (event) {\n"
+"    if (event.lengthComputable) {\n"
+"      document.getElementById(\"progress\").style.width = (event.loaded / event.total) * 100 + \"%\";\n"
+"    }\n"
+"  });\n"
+"  xhr.onreadystatechange = function () {\n"
+"    if (xhr.readyState === XMLHttpRequest.DONE) {\n"
+"      const status = xhr.status;\n"
+"      if (status >= 200 && status < 400) {\n"
+"        document.getElementById(\"status_div\").innerHTML = \"Upload accepted. Device will reboot.\";\n"
+"      } else {\n"
+"        document.getElementById(\"status_div\").innerHTML = \"Upload rejected!\";\n"
+"      }\n"
+"    }\n"
+"  };\n"
+"  xhr.send(data);\n"
+"  return false;\n"
+"}\n"
+"\n"
+"function debug_poll() {\n"
+"  var xhttp = new XMLHttpRequest();\n"
+"  xhttp.onreadystatechange = function () {\n"
+"    if (xhttp.readyState == XMLHttpRequest.DONE) {\n"
+"      if (xhttp.status == 200 && xhttp.responseText.length > 0) {\n"
+"        let str = xhttp.responseText.replace(/(?:\\r\\n|\\r|\\n)/g, '<br>');\n"
+"        let obj = document.getElementById(\"debug-terminal\");\n"
+"        obj.innerHTML += str;\n"
+"        obj.scrollTop = obj.scrollHeight;\n"
+"      }\n"
+"    }\n"
+"  };\n"
+"  xhttp.open(\"GET\", \"log\", true);\n"
+"  xhttp.send();\n"
+"}\n"
+"\n"
+"window.onload = loadSettings;\n"
+"</script>\n"
+"</head>\n"
+"<body class=\"bg-dark\" style=\"padding-bottom:100px;\">\n"
+"<div class=\"well\">\n"
+"<div class=\"container bg-light px-5 py-3\" style=\"max-width:1200px;\">\n"
+"<div class=\"row\">\n"
+"<div class=\"col\" style=\"text-align: center;\">\n"
+"<h1>Device Configuration</h1>\n"
+"<form onsubmit=\"event.preventDefault(); saveSettings();\">\n"
+"<label>Device Name: <input type=\"text\" id=\"device_name\"></label><br>\n"
+"<label>Direction Invert: <input type=\"checkbox\" id=\"dir_invert\"></label><br>\n"
+"<label>Max Speed: <input type=\"number\" id=\"max_speed\"></label><br>\n"
+"<h3>Network Configuration</h3>\n"
+"<label>IP Address: <input type=\"text\" id=\"ip_address\" required pattern=\"^((\\d{1,2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(\\d{1,2}|1\\d\\d|2[0-4]\\d|25[0-5])$\"></label><br>\n"
+"<label>Gateway: <input type=\"text\" id=\"gateway\" required pattern=\"^((\\d{1,2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(\\d{1,2}|1\\d\\d|2[0-4]\\d|25[0-5])$\"></label><br>\n"
+"<label>Netmask: <input type=\"text\" id=\"netmask\" required pattern=\"^((\\d{1,2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(\\d{1,2}|1\\d\\d|2[0-4]\\d|25[0-5])$\"></label><br>\n"
+"<label>DHCP Enable: <input type=\"checkbox\" id=\"dhcp_enable\"></label><br>\n"
+"<h3>MQTT Configuration</h3>\n"
+"<label>MQTT URI: <input type=\"text\" id=\"mqtt_uri\"></label><br>\n"
+"<label>MQTT User: <input type=\"text\" id=\"mqtt_user\"></label><br>\n"
+"<label>MQTT Pass: <input type=\"password\" id=\"mqtt_pass\"></label><br>\n"
+"<button type=\"submit\">Save Settings</button>\n"
+"</form>\n"
+"<hr />\n"
+"<h3>Firmware Update</h3>\n"
+"<button onclick=\"file_sel.click();\">Select Binary</button><br>\n"
+"<div class=\"progress\" style=\"height: 20px;\">\n"
+"<div class=\"progress-bar\" id=\"progress\"></div>\n"
+"</div>\n"
+"<div class=\"status\" id=\"status_div\"></div><br>\n"
+"<input type=\"file\" id=\"file_sel\" onchange=\"upload_file()\" style=\"display: none;\"></input><br>\n"
+"<hr />\n"
+"<button id=\"rebootBtn\">Reboot Device</button>\n"
+"</div>\n"
+"<div class=\"col\">\n"
+"<p class=\"border p-2 m-2 bg-secondary text-white overflow-auto\" style=\"max-height:800px;\" id=\"debug-terminal\"></p>\n"
+"</div>\n"
+"</div>\n"
+"</div>\n"
+"</body>\n"
+"</html>\n";
+
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
-    const char *html = 
-        "<!DOCTYPE html>"
-        "<link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/2.2.1/css/bootstrap.min.css\">"
-        "<html><head><title>Device Settings</title>"
-        "<script>"
-        "async function loadSettings() {"
-        "document.getElementById('rebootBtn').addEventListener('click', () => {"
-        "if (confirm('Are you sure you want to reboot the device?')) {"
-        "fetch('/api/reboot', { method: 'POST' })"
-        ".then(response => {"
-        "if (response.ok) { alert('Reboot initiated!'); }"
-        "else { alert('Failed to reboot.'); }"
-        "})"
-        ".catch(() => alert('Error sending reboot request.'));"
-        "}"
-        "});"
-        "const response = await fetch('/api/settings');"
-        "if (response.ok) {"
-        "const data = await response.json();"
-        "document.getElementById('ip_address').value = data.ip_address;"
-        "document.getElementById('gateway').value = data.gateway;"
-        "document.getElementById('netmask').value = data.netmask;"
-        "document.getElementById('dhcp_enable').checked = data.dhcp_enable;"
-        "document.getElementById('dir_invert').checked = data.dir_invert;"
-        "document.getElementById('max_speed').value = data.max_speed;"
-        "document.getElementById('mqtt_uri').value = data.mqtt_uri;"
-        "document.getElementById('mqtt_user').value = data.mqtt_user;"
-        "document.getElementById('mqtt_pass').value = data.mqtt_pass;"
-        "document.getElementById('device_name').value = data.device_name;"
-        "}"
-        "}"
-        "async function saveSettings() {"
-        "const data = {"
-        "ip_address: document.getElementById('ip_address').value,"
-        "gateway: document.getElementById('gateway').value,"
-        "netmask: document.getElementById('netmask').value,"
-        "dhcp_enable: document.getElementById('dhcp_enable').checked,"
-        "dir_invert: document.getElementById('dir_invert').checked,"
-        "max_speed: parseInt(document.getElementById('max_speed').value),"
-        "mqtt_uri: document.getElementById('mqtt_uri').value,"
-        "mqtt_user: document.getElementById('mqtt_user').value,"
-        "mqtt_pass: document.getElementById('mqtt_pass').value,"
-        "device_name: document.getElementById('device_name').value"
-        "};"
-        "const response = await fetch('/api/settings', {"
-        "method: 'POST',"
-        "headers: { 'Content-Type': 'application/json' },"
-        "body: JSON.stringify(data)"
-        "});"
-        "if (response.ok) { alert('Settings saved!'); } else { alert('Failed to save'); } }"
-        "window.onload = loadSettings;"
-        "</script>"
-        "</head><body>"
-        "<h1>Device Configuration</h1>"
-        "<form onsubmit='event.preventDefault(); saveSettings();'>"
-        "<label>IP Address: <input type='text' id='ip_address' pattern=\"^(?>(\\d|[1-9]\\d{2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(?1)$\"></label><br>"
-        "<label>Gateway: <input type='text' id='gateway' pattern=\"^(?>(\\d|[1-9]\\d{2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(?1)$\"></label><br>"
-        "<label>Netmask: <input type='text' id='netmask' pattern=\"^(?>(\\d|[1-9]\\d{2}|1\\d\\d|2[0-4]\\d|25[0-5])\\.){3}(?1)$\"></label><br>"
-        "<label>DHCP Enable: <input type='checkbox' id='dhcp_enable'></label><br>"
-        "<label>Direction Invert: <input type='checkbox' id='dir_invert'></label><br>"
-        "<label>Max Speed: <input type='number' id='max_speed'></label><br>"
-        "<label>MQTT URI: <input type='text' id='mqtt_uri'></label><br>"
-        "<label>MQTT User: <input type='text' id='mqtt_user'></label><br>"
-        "<label>MQTT Pass: <input type='password' id='mqtt_pass'></label><br>"
-        "<label>Device Name: <input type='text' id='device_name'></label><br>"
-        "<button type='submit'>Save Settings</button>"
-        "</form>"
-        "<button id='rebootBtn'>Reboot Device</button>"
-        "</body></html>";
-
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
     return ESP_OK;
@@ -419,6 +387,14 @@ static esp_err_t api_reboot_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t debug_logs_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, debug_buf, strlen(debug_buf));
+    memset(debug_buf, 0, sizeof(debug_buf));
+    return ESP_OK;
+}
+
 //-----------------------------------------------------------------------------
 httpd_handle_t start_webserver(void)
 {
@@ -445,7 +421,7 @@ httpd_handle_t start_webserver(void)
             .handler = api_get_settings_handler,
         };
         httpd_register_uri_handler(server, &api_get_uri);
-        
+
         static httpd_uri_t api_post_uri = {
             .uri = "/api/settings",
             .method = HTTP_POST,
@@ -468,14 +444,69 @@ httpd_handle_t start_webserver(void)
             };
         httpd_register_uri_handler(server, &ota_post);
 
-        static httpd_uri_t ota_get =
-            {
-                .uri = "/ota",
-                .method = HTTP_GET,
-                .handler = ota_get_handler,
-            };
-        httpd_register_uri_handler(server, &ota_get);
+        static const httpd_uri_t debug_logs_uri = {
+            .uri = "/log",
+            .method = HTTP_GET,
+            .handler = debug_logs_get_handler,
+        };
+        httpd_register_uri_handler(server, &debug_logs_uri);
     }
 
     return NULL;
+}
+
+void str_cat_move(char *buffer, int buf_size, char *buffer_append)
+{
+    uint16_t size = strlen(buffer_append);
+
+    // use buffer size minus 1
+    buf_size--;
+
+    // buffer already filled to the top?
+    if (strlen(buffer) >= buf_size)
+    {
+        // copy the entire log buffer back the amount of data that is to be appended
+        memcpy(buffer, &buffer[size], buf_size - size);
+
+        // copy new data into the buffer
+        memcpy(&buffer[buf_size - size], buffer_append, size);
+
+        // be sure to zero out the end
+        buffer[buf_size] = 0;
+    }
+    // when appending the new string, buffer will overflow?
+    else if (strlen(buffer) + strlen(buffer_append) > buf_size)
+    {
+        // how many bytes will the buffer overflow?
+        uint16_t overflow = (strlen(buffer) + size) % buf_size;
+
+        // copy the entire log buffer back the amount of data that is overflown
+        memcpy(buffer, &buffer[overflow], buf_size - overflow);
+
+        // copy new data into the buffer
+        memcpy(&buffer[buf_size - size], buffer_append, size);
+
+        // be sure to zero out the end
+        buffer[buf_size] = 0;
+    }
+    // new string fits into buffer without problems
+    else
+    {
+        // copy new data into the buffer
+        memcpy(&buffer[strlen(buffer)], buffer_append, size);
+    }
+}
+
+static int httpDebugPrintf(const char *fmt, va_list lst)
+{
+    char buffer[256];
+    vsnprintf(buffer, sizeof(buffer), fmt, lst);
+    str_cat_move(debug_buf, sizeof(debug_buf) - 1, buffer);
+    return debug_root_func(fmt, lst);
+}
+
+// Initialization function to override log function
+void setup_log_capture(void)
+{
+    debug_root_func = esp_log_set_vprintf(httpDebugPrintf);
 }

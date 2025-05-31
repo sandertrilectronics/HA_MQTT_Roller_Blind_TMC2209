@@ -3,3 +3,5 @@
 #include <esp_http_server.h>
 
 httpd_handle_t start_webserver(void);
+
+void setup_log_capture(void);

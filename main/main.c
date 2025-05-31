@@ -378,10 +378,13 @@ typedef enum
     STP_SETUP_UP_SLOW,
     STP_SETUP_UP_STOP,
 } stp_setup_state_t;
+
 ///////////////////////////////////////
 
 void app_main(void)
 {
+    setup_log_capture();
+
     ESP_LOGI("SYS", "Starting...");
 
     {
@@ -597,7 +600,14 @@ void app_main(void)
             {
                 float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
                 ha_lib_cover_set_position(cover_handle, (int)calc_pos);
-                ha_lib_cover_set_state(cover_handle, "stopped");
+                if (calc_pos == 100)
+                {
+                    ha_lib_cover_set_state(cover_handle, "close");
+                }
+                else
+                {
+                    ha_lib_cover_set_state(cover_handle, "open");
+                }
             }
             else if (stepper_moving == 4)
             {
