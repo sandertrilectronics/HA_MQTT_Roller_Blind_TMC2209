@@ -74,8 +74,6 @@ static void stepper_handle(tmc2209_io_t *stp)
         // what is our position difference?
         int step_target_offset = abs(stp->step_target - stp->step_position);
 
-        ESP_LOGI("STP", "%d %d %d", (int)stp->step_target, (int)stp->step_position, step_target_offset);
-
         // nearing the end of our movement?
         if (step_target_offset < (stp->rpm_set * 25)) {
             // first time since start? Happens for small steps
@@ -112,7 +110,7 @@ static void stepper_handle(tmc2209_io_t *stp)
                 else
                     gpio_set_level(stp->dir, !stp->dir_set);
 
-                // direct start?
+                // direct start? (low rpm)
                 if (stp->s_curve_steps == 1) {
                     stp->duty_set = stp->rpm_set * STP_STEP_PER_RPM / 60;
                 }
@@ -137,14 +135,18 @@ static void stepper_handle(tmc2209_io_t *stp)
             }       
             // speeding up
             else {
-                // set timer
-                stp->duty_set = stp->s_cruve_arr[stp->s_cruve_index] - 1;
-                stp->alarm_config.alarm_count = 1000000 / stp->duty_set;
-                stp->alarm_config.flags.auto_reload_on_alarm = true;
-                gptimer_set_alarm_action(stp->gptimer, &stp->alarm_config);
-                ESP_LOGI("SYS", "Duty set to %d", (int)stp->duty_set);
+                static uint8_t sub_counter = 0;
+                if (++sub_counter >= 2) {
+                    sub_counter = 0;
 
-                stp->s_cruve_index++;
+                    stp->duty_set = stp->s_cruve_arr[stp->s_cruve_index] - 1;
+                    stp->alarm_config.alarm_count = 1000000 / stp->duty_set;
+                    stp->alarm_config.flags.auto_reload_on_alarm = true;
+                    gptimer_set_alarm_action(stp->gptimer, &stp->alarm_config);
+                    ESP_LOGI("SYS", "Duty set to %d", (int)stp->duty_set);
+
+                    stp->s_cruve_index++;
+                }
             }
         }
     }

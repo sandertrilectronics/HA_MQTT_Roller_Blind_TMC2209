@@ -5,9 +5,10 @@
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 
+#define MICROSTEPS          8
 #define STP_RPM_MAX         300
 #define STP_RPM_DIRECT      30
-#define STP_STEP_PER_RPM    (200 * 8)
+#define STP_STEP_PER_RPM    (200 * MICROSTEPS)
 
 #define S_CURVE_ARR_LEN     (STP_RPM_MAX / 5)
 
