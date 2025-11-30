@@ -3,9 +3,13 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "secret.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 
 static uint8_t _ha_mqtt_connected = 0;
 static char _ha_lib_id[32] = {0};
+static TimerHandle_t availability_timer = NULL;
+static esp_mqtt_client_handle_t client = NULL;
 
 static const char *discover_packet_cover = "{"
 "\"name\": \"%s\","
@@ -95,6 +99,28 @@ static const char *discover_packet_number = "{"
 "\"unit_of_measurement\": \"RPM\","
 "\"avty_t\": \"number/%s/availability\","
 "\"platform\": \"number\","
+"\"device\": {"
+"\"name\": \"%s\","
+"\"manufacturer\": \"%s\","
+"\"model\": \"%s\","
+"\"identifiers\": \"%s_%s\","
+"\"sw_version\": \"%s\""
+"}"
+"}";
+
+static const char *discover_packet_light = "{"
+"\"name\": \"%s\","
+"\"uniq_id\": \"%s\","
+"\"cmd_t\": \"light/%s/set\","
+"\"stat_t\": \"light/%s/state\","
+"\"avty_t\": \"light/%s/availability\","
+"\"brightness\": %s,"
+"\"color_temp\": %s,"
+"\"rgb\": %s,"
+"\"min_mireds\": %d,"
+"\"max_mireds\": %d,"
+"\"schema\": \"json\","
+"\"platform\": \"light\","
 "\"device\": {"
 "\"name\": \"%s\","
 "\"manufacturer\": \"%s\","
@@ -215,8 +241,77 @@ static void _create_discover_packet_number(char *buffer, uint16_t buffer_len, ha
     );
 }
 
-static uint8_t _subsribe_buffer_index = 0;
+static void _create_discover_packet_light(char *buffer, uint16_t buffer_len, ha_light_param_t *param, char *unique_id) {
+    snprintf(buffer, buffer_len, discover_packet_light,
+        param->name,
+        unique_id,
+        unique_id,
+        unique_id,
+        unique_id,
+        param->support_brightness ? "true" : "false",
+        param->support_color_temp ? "true" : "false", 
+        param->support_rgb ? "true" : "false",
+        param->min_mireds,
+        param->max_mireds,
+        param->device_name,
+        param->manufacturer,
+        param->model,
+        param->identifiers,
+        _ha_lib_id,
+        param->sw_version
+    );
+}
+
+static uint8_t _subscribe_buffer_index = 0;
 static subscribe_buffer_t _subscribe_buffer[8] = {0};
+
+static void availability_timer_callback(TimerHandle_t xTimer) {
+    if (!_ha_mqtt_connected) {
+        return;
+    }
+    
+    char buffer[256];
+    
+    // Publish availability for all registered components
+    for (uint8_t i = 0; i < _subscribe_buffer_index; i++) {
+        switch (_subscribe_buffer[i].type) {
+            case HA_COMPONENT_COVER:
+                snprintf(buffer, sizeof(buffer), "cover/%s/availability", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "online", 0, 1, 0);
+                break;
+                
+            case HA_COMPONENT_SWITCH:
+                snprintf(buffer, sizeof(buffer), "switch/%s/availability", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "online", 0, 1, 0);
+                break;
+                
+            case HA_COMPONENT_BUTTON:
+                snprintf(buffer, sizeof(buffer), "button/%s/availability", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "online", 0, 1, 0);
+                break;
+                
+            case HA_COMPONENT_TEXT_SENSOR:
+                snprintf(buffer, sizeof(buffer), "sensor/%s/availability", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "online", 0, 1, 0);
+                // Also set initial state for text sensor
+                snprintf(buffer, sizeof(buffer), "sensor/%s/state", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "Idle State", 0, 1, 0);
+                break;
+                
+            case HA_COMPONENT_NUMBER:
+                snprintf(buffer, sizeof(buffer), "number/%s/availability", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "online", 0, 1, 0);
+                break;
+                
+            case HA_COMPONENT_LIGHT:
+                snprintf(buffer, sizeof(buffer), "light/%s/availability", _subscribe_buffer[i].unique_id);
+                esp_mqtt_client_publish(client, buffer, "online", 0, 1, 0);
+                break;
+        }
+    }
+
+    _ha_mqtt_connected = 2;
+}
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -229,12 +324,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI("MQTT", "MQTT_EVENT_CONNECTED");
-
-        _ha_mqtt_connected = 1;
     
-        for (uint8_t i = 0; i < _subsribe_buffer_index; i++) {
+        for (uint8_t i = 0; i < _subscribe_buffer_index; i++) {
             switch (_subscribe_buffer[i].type) {
-                case 0x03:
+                case HA_COMPONENT_COVER:
                     // subscribe to callbacks
                     snprintf(buffer, sizeof(buffer), "cover/%s/set", _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_subscribe(client, buffer, 1);
@@ -245,14 +338,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     snprintf(buffer, sizeof(buffer), "homeassistant/cover/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_cover(discover_packet, sizeof(discover_packet), (ha_cover_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
-
-                    // set state to online
-                    snprintf(buffer, sizeof(buffer), "cover/%s/availability", _subscribe_buffer[i].unique_id);
-                    snprintf(discover_packet, sizeof(discover_packet), "online");
-                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
                     break;
     
-                case 0x04:
+                case HA_COMPONENT_SWITCH:
                     // subscribe to callbacks
                     snprintf(buffer, sizeof(buffer), "switch/%s/set", _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_subscribe(client, buffer, 1);
@@ -263,14 +351,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     snprintf(buffer, sizeof(buffer), "homeassistant/switch/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_switch(discover_packet, sizeof(discover_packet), (ha_switch_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
-
-                    // set state to online
-                    snprintf(buffer, sizeof(buffer), "switch/%s/availability", _subscribe_buffer[i].unique_id);
-                    snprintf(discover_packet, sizeof(discover_packet), "online");
-                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
                     break;
     
-                case 0x05:
+                case HA_COMPONENT_BUTTON:
                     // subscribe to callbacks
                     snprintf(buffer, sizeof(buffer), "button/%s/press", _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_subscribe(client, buffer, 1);
@@ -279,31 +362,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     snprintf(buffer, sizeof(buffer), "homeassistant/button/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_button(discover_packet, sizeof(discover_packet), (ha_button_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
-
-                    // set state to online
-                    snprintf(buffer, sizeof(buffer), "button/%s/availability", _subscribe_buffer[i].unique_id);
-                    snprintf(discover_packet, sizeof(discover_packet), "online");
-                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
                     break;
 
-                case 0x06:
+                case HA_COMPONENT_TEXT_SENSOR:
                     // publish discover packet
                     snprintf(buffer, sizeof(buffer), "homeassistant/sensor/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_text_sensor(discover_packet, sizeof(discover_packet), (ha_text_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
-
-                    // set state to online
-                    snprintf(buffer, sizeof(buffer), "sensor/%s/availability", _subscribe_buffer[i].unique_id);
-                    snprintf(discover_packet, sizeof(discover_packet), "online");
-                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
-
-                    // set state to online
-                    snprintf(buffer, sizeof(buffer), "sensor/%s/state", _subscribe_buffer[i].unique_id);
-                    snprintf(discover_packet, sizeof(discover_packet), "Idle State");
-                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
                     break;
 
-                case 0x07:
+                case HA_COMPONENT_NUMBER:
                     // subscribe to callbacks
                     snprintf(buffer, sizeof(buffer), "number/%s/set", _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_subscribe(client, buffer, 1);
@@ -312,13 +380,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     snprintf(buffer, sizeof(buffer), "homeassistant/number/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
                     _create_discover_packet_number(discover_packet, sizeof(discover_packet), (ha_number_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
                     esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
+                    break;
 
-                    // set state to online
-                    snprintf(buffer, sizeof(buffer), "number/%s/availability", _subscribe_buffer[i].unique_id);
-                    snprintf(discover_packet, sizeof(discover_packet), "online");
-                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 0);
+                case HA_COMPONENT_LIGHT:
+                    // subscribe to callbacks
+                    snprintf(buffer, sizeof(buffer), "light/%s/set", _subscribe_buffer[i].unique_id);
+                    esp_mqtt_client_subscribe(client, buffer, 1);
+
+                    // publish discover packet
+                    snprintf(buffer, sizeof(buffer), "homeassistant/light/%s/%s/config", _ha_lib_id, _subscribe_buffer[i].unique_id);
+                    _create_discover_packet_light(discover_packet, sizeof(discover_packet), (ha_light_param_t *)_subscribe_buffer[i].config_struct, _subscribe_buffer[i].unique_id);
+                    esp_mqtt_client_publish(client, buffer, discover_packet, 0, 1, 1);
                     break;
             }
+        }
+
+        _ha_mqtt_connected = 1;
+        
+        // Start availability timer to publish availability status after 1 second
+        if (availability_timer != NULL) {
+            xTimerStart(availability_timer, 0);
         }
         break;
     case MQTT_EVENT_DISCONNECTED:
@@ -338,9 +419,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_DATA:
         ESP_LOGI("MQTT", "MQTT_EVENT_DATA");
         //ESP_LOGI("MQTT", "%.*s %.*s", event->topic_len, event->topic, event->data_len, event->data);
-        for (uint8_t i = 0; i < _subsribe_buffer_index; i++) {
+        for (uint8_t i = 0; i < _subscribe_buffer_index; i++) {
             switch (_subscribe_buffer[i].type) {
-                case 0x03:
+                case HA_COMPONENT_COVER:
                     snprintf(buffer, sizeof(buffer), "cover/%s/set", _subscribe_buffer[i].unique_id);
                     if (memcmp(event->topic, buffer, event->topic_len) == 0) {
                         ha_cover_param_t *struct_cover = (ha_cover_param_t *)_subscribe_buffer[i].config_struct;
@@ -357,7 +438,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
                     break;
                 
-                case 0x04:
+                case HA_COMPONENT_SWITCH:
                     snprintf(buffer, sizeof(buffer), "switch/%s/set", _subscribe_buffer[i].unique_id);
                     if (memcmp(event->topic, buffer, event->topic_len) == 0) {
                         ha_switch_param_t *struct_cover = (ha_switch_param_t *)_subscribe_buffer[i].config_struct;
@@ -374,7 +455,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
                     break;
                 
-                case 0x05:
+                case HA_COMPONENT_BUTTON:
                     snprintf(buffer, sizeof(buffer), "button/%s/press", _subscribe_buffer[i].unique_id);
                     if (memcmp(event->topic, buffer, event->topic_len) == 0) {
                         ha_button_param_t *struct_cover = (ha_button_param_t *)_subscribe_buffer[i].config_struct;
@@ -384,7 +465,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
                     break;
                 
-                case 0x07:
+                case HA_COMPONENT_NUMBER:
                     snprintf(buffer, sizeof(buffer), "number/%s/set", _subscribe_buffer[i].unique_id);
                     if (memcmp(event->topic, buffer, event->topic_len) == 0) {
                         ha_number_param_t *struct_cover = (ha_number_param_t *)_subscribe_buffer[i].config_struct;
@@ -392,6 +473,19 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                         break;
                     }
 
+                    break;
+
+                case HA_COMPONENT_LIGHT:
+                    snprintf(buffer, sizeof(buffer), "light/%s/set", _subscribe_buffer[i].unique_id);
+                    if (memcmp(event->topic, buffer, event->topic_len) == 0) {
+                        ha_light_param_t *struct_light = (ha_light_param_t *)_subscribe_buffer[i].config_struct;
+                        struct_light->update_mqtt(event->topic, event->data, event->data_len);
+                        break;
+                    }
+
+                    break;
+
+                default:
                     break;
             }
         }
@@ -409,8 +503,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-static esp_mqtt_client_handle_t client = NULL;
-
 void ha_lib_init(char *mqtt_uri, char *mqtt_user, char *mqtt_pass) {
     // configure client
     esp_mqtt_client_config_t mqtt_cfg = {
@@ -419,6 +511,15 @@ void ha_lib_init(char *mqtt_uri, char *mqtt_user, char *mqtt_pass) {
         .credentials.authentication.password = mqtt_pass
     };
     client = esp_mqtt_client_init(&mqtt_cfg);
+    
+    // create availability timer (one-shot, 1 second)
+    availability_timer = xTimerCreate(
+        "availability_timer",
+        pdMS_TO_TICKS(1000),  // 1 second
+        pdFALSE,              // one-shot timer
+        NULL,                 // timer ID
+        availability_timer_callback
+    );
     
     // start mqtt client
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
@@ -429,73 +530,86 @@ void ha_lib_init(char *mqtt_uri, char *mqtt_user, char *mqtt_pass) {
 }
 
 uint8_t ha_lib_mqtt_connected(void) {
-    return _ha_mqtt_connected;
+    return (_ha_mqtt_connected == 2) ? 1 : 0;
 }
 
 subscribe_buffer_t *ha_lib_cover_register(ha_cover_param_t *param) {
-    if (_subsribe_buffer_index >= 8)
+    if (_subscribe_buffer_index >= 8)
         return NULL;
 
-    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "cover");
-    _subscribe_buffer[_subsribe_buffer_index].type = 0x03;
-    _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
-    subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
-    _subsribe_buffer_index++;
+    _create_unique_id(_subscribe_buffer[_subscribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subscribe_buffer_index].unique_id), "cover");
+    _subscribe_buffer[_subscribe_buffer_index].type = HA_COMPONENT_COVER;
+    _subscribe_buffer[_subscribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subscribe_buffer_index];
+    _subscribe_buffer_index++;
 
     return ptr;
 }
 
 // For Switch
 subscribe_buffer_t *ha_lib_switch_register(ha_switch_param_t *param) {
-    if (_subsribe_buffer_index >= 8)
+    if (_subscribe_buffer_index >= 8)
         return NULL;
 
-    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "switch");
-    _subscribe_buffer[_subsribe_buffer_index].type = 0x04;
-    _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
-    subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
-    _subsribe_buffer_index++;
+    _create_unique_id(_subscribe_buffer[_subscribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subscribe_buffer_index].unique_id), "switch");
+    _subscribe_buffer[_subscribe_buffer_index].type = HA_COMPONENT_SWITCH;
+    _subscribe_buffer[_subscribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subscribe_buffer_index];
+    _subscribe_buffer_index++;
 
     return ptr;
 }
 
 // For Button
 subscribe_buffer_t *ha_lib_button_register(ha_button_param_t *param) {
-    if (_subsribe_buffer_index >= 8)
+    if (_subscribe_buffer_index >= 8)
         return NULL;
 
-    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "button");
-    _subscribe_buffer[_subsribe_buffer_index].type = 0x05;
-    _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
-    subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
-    _subsribe_buffer_index++;
+    _create_unique_id(_subscribe_buffer[_subscribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subscribe_buffer_index].unique_id), "button");
+    _subscribe_buffer[_subscribe_buffer_index].type = HA_COMPONENT_BUTTON;
+    _subscribe_buffer[_subscribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subscribe_buffer_index];
+    _subscribe_buffer_index++;
 
     return ptr;
 }
 
 //
 subscribe_buffer_t *ha_lib_text_register(ha_text_param_t *param) {
-    if (_subsribe_buffer_index >= 8)
+    if (_subscribe_buffer_index >= 8)
         return NULL;
 
-    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "text");
-    _subscribe_buffer[_subsribe_buffer_index].type = 0x06;
-    _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
-    subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
-    _subsribe_buffer_index++;
+    _create_unique_id(_subscribe_buffer[_subscribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subscribe_buffer_index].unique_id), "text");
+    _subscribe_buffer[_subscribe_buffer_index].type = HA_COMPONENT_TEXT_SENSOR;
+    _subscribe_buffer[_subscribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subscribe_buffer_index];
+    _subscribe_buffer_index++;
 
     return ptr;
 }
 
 subscribe_buffer_t *ha_lib_number_register(ha_number_param_t *param) {
-    if (_subsribe_buffer_index >= 8)
+    if (_subscribe_buffer_index >= 8)
         return NULL;
 
-    _create_unique_id(_subscribe_buffer[_subsribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subsribe_buffer_index].unique_id), "number");
-    _subscribe_buffer[_subsribe_buffer_index].type = 0x07; // new type for number
-    _subscribe_buffer[_subsribe_buffer_index].config_struct = (void *)param;
-    subscribe_buffer_t *ptr = &_subscribe_buffer[_subsribe_buffer_index];
-    _subsribe_buffer_index++;
+    _create_unique_id(_subscribe_buffer[_subscribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subscribe_buffer_index].unique_id), "number");
+    _subscribe_buffer[_subscribe_buffer_index].type = HA_COMPONENT_NUMBER;
+    _subscribe_buffer[_subscribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subscribe_buffer_index];
+    _subscribe_buffer_index++;
+
+    return ptr;
+}
+
+subscribe_buffer_t *ha_lib_light_register(ha_light_param_t *param) {
+    if (_subscribe_buffer_index >= 8)
+        return NULL;
+
+    _create_unique_id(_subscribe_buffer[_subscribe_buffer_index].unique_id, sizeof(_subscribe_buffer[_subscribe_buffer_index].unique_id), "light");
+    _subscribe_buffer[_subscribe_buffer_index].type = HA_COMPONENT_LIGHT;
+    _subscribe_buffer[_subscribe_buffer_index].config_struct = (void *)param;
+    subscribe_buffer_t *ptr = &_subscribe_buffer[_subscribe_buffer_index];
+    _subscribe_buffer_index++;
 
     return ptr;
 }
@@ -540,4 +654,46 @@ void ha_lib_number_update(subscribe_buffer_t *number_buffer, int number) {
     snprintf(topic, sizeof(topic), "number/%s/state", number_buffer->unique_id);
     snprintf(num_buf, sizeof(num_buf), "%d", number);
     esp_mqtt_client_publish(client, topic, num_buf, 0, 1, 0);
+}
+
+void ha_lib_light_set_state(subscribe_buffer_t *light_buffer, const char *state) {
+    char topic[128];
+    char msg_buf[256];
+    snprintf(topic, sizeof(topic), "light/%s/state", light_buffer->unique_id);
+    snprintf(msg_buf, sizeof(msg_buf), "{\"state\":\"%s\"}", state);
+    esp_mqtt_client_publish(client, topic, msg_buf, 0, 1, 0);
+}
+
+void ha_lib_light_set_brightness(subscribe_buffer_t *light_buffer, uint8_t brightness) {
+    char topic[128];
+    char msg_buf[256];
+    snprintf(topic, sizeof(topic), "light/%s/state", light_buffer->unique_id);
+    snprintf(msg_buf, sizeof(msg_buf), "{\"state\":\"ON\",\"brightness\":%d}", brightness);
+    esp_mqtt_client_publish(client, topic, msg_buf, 0, 1, 0);
+}
+
+void ha_lib_light_set_color_rgb(subscribe_buffer_t *light_buffer, uint8_t r, uint8_t g, uint8_t b) {
+    char topic[128];
+    char msg_buf[256];
+    snprintf(topic, sizeof(topic), "light/%s/state", light_buffer->unique_id);
+    snprintf(msg_buf, sizeof(msg_buf), "{\"state\":\"ON\",\"color\":{\"r\":%d,\"g\":%d,\"b\":%d}}", r, g, b);
+    esp_mqtt_client_publish(client, topic, msg_buf, 0, 1, 0);
+}
+
+void ha_lib_light_set_color_temp(subscribe_buffer_t *light_buffer, uint16_t color_temp) {
+    char topic[128];
+    char msg_buf[256];
+    snprintf(topic, sizeof(topic), "light/%s/state", light_buffer->unique_id);
+    snprintf(msg_buf, sizeof(msg_buf), "{\"state\":\"ON\",\"color_temp\":%d}", color_temp);
+    esp_mqtt_client_publish(client, topic, msg_buf, 0, 1, 0);
+}
+
+void ha_lib_light_set_full_state(subscribe_buffer_t *light_buffer, const char *state, uint8_t brightness, uint8_t r, uint8_t g, uint8_t b, uint16_t color_temp) {
+    char topic[128];
+    char msg_buf[512];
+    snprintf(topic, sizeof(topic), "light/%s/state", light_buffer->unique_id);
+    snprintf(msg_buf, sizeof(msg_buf), 
+        "{\"state\":\"%s\",\"brightness\":%d,\"color\":{\"r\":%d,\"g\":%d,\"b\":%d},\"color_temp\":%d}", 
+        state, brightness, r, g, b, color_temp);
+    esp_mqtt_client_publish(client, topic, msg_buf, 0, 1, 0);
 }

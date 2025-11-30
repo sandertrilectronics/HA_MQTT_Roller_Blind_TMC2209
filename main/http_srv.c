@@ -5,6 +5,7 @@
 #include "sys_cfg.h"
 #include "cJSON.h"
 #include "esp_log.h"
+#include "secret.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -216,7 +217,7 @@ const char html[] =
 "<div class=\"container bg-light px-5 py-3\" style=\"max-width:1200px;\">\n"
 "<div class=\"row\">\n"
 "<div class=\"col\" style=\"text-align: center;\">\n"
-"<h1>Device Configuration</h1>\n"
+"<h1>Device Configuration " SW_VERSION_STR "</h1>\n"
 "<form onsubmit=\"event.preventDefault(); saveSettings();\">\n"
 "<label>Device Name: <input type=\"text\" id=\"device_name\"></label><br>\n"
 "<label>Direction Invert: <input type=\"checkbox\" id=\"dir_invert\"></label><br>\n"

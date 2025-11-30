@@ -4,4 +4,6 @@
 #define WIFI_SSID       "***"
 #define WIFI_PASS       "***"
 
+#define SW_VERSION_STR  "V1.0"
+
 #endif

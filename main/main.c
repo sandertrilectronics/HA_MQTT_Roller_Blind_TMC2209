@@ -385,7 +385,7 @@ void app_main(void)
 {
     setup_log_capture();
 
-    ESP_LOGI("SYS", "Starting...");
+    ESP_LOGI("SYS", "Starting, SW: " SW_VERSION_STR);
 
     {
         gpio_config_t io_conf = {};
