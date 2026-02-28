@@ -23,6 +23,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/queue.h>
 
 #include "lwip/ip_addr.h"
 
@@ -31,6 +32,30 @@
 #include "secret.h"
 #include "sys_cfg.h"
 #include "http_srv.h"
+
+/////////////////////////////////////////////////////////////////////////////
+// Command Queue Definitions
+/////////////////////////////////////////////////////////////////////////////
+typedef enum {
+    CMD_COVER_OPEN,
+    CMD_COVER_CLOSE,
+    CMD_COVER_STOP,
+    CMD_COVER_POSITION,
+    CMD_SWITCH_MOUNT_OFF,
+    CMD_SWITCH_MOUNT_ON,
+    CMD_SWITCH_SETUP_OFF,
+    CMD_SWITCH_SETUP_ON,
+    CMD_BUTTON_SETUP_PRESS,
+    CMD_NUMBER_RPM
+} command_type_t;
+
+typedef struct {
+    command_type_t type;
+    int value;  // Used for position or RPM commands
+} command_t;
+
+#define COMMAND_QUEUE_SIZE 10
+static QueueHandle_t command_queue = NULL;
 
 /////////////////////////////////////////////////////////////////////////////
 static char s_ip_addr_str[16] = "0.0.0.0";
@@ -230,11 +255,8 @@ static int _atoi_checked(const char *str, int *ret)
 }
 
 //////////////////////////////////
-uint8_t set_cover_state = 0;
-uint8_t set_switch_mount = 0;
-uint8_t set_switch_setup = 0;
-uint8_t set_button_setup = 0;
-uint8_t set_rpm_max = 0;
+// MQTT Callback Functions - Enqueue commands to queue
+//////////////////////////////////
 
 void ha_cb_cover_update(char *topic, char *data, int data_len)
 {
@@ -242,57 +264,83 @@ void ha_cb_cover_update(char *topic, char *data, int data_len)
     char buffer[data_len + 1];
     memset(buffer, 0, data_len + 1);
     memcpy(buffer, data, data_len);
+    
+    command_t cmd;
 
     if (strcmp(buffer, "OPEN") == 0)
     {
-        set_cover_state = 1;
+        cmd.type = CMD_COVER_OPEN;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
     else if (strcmp(buffer, "CLOSE") == 0)
     {
-        set_cover_state = 2;
+        cmd.type = CMD_COVER_CLOSE;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
     else if (strcmp(buffer, "STOP") == 0)
     {
-        set_cover_state = 3;
+        cmd.type = CMD_COVER_STOP;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
     else if (_atoi_checked(buffer, &pos) == 0)
     {
         if (pos >= 0 && pos <= 100)
         {
-            set_cover_state = 100 + pos;
+            cmd.type = CMD_COVER_POSITION;
+            cmd.value = pos;
+            xQueueSend(command_queue, &cmd, 0);
         }
     }
 }
 
 void ha_cb_switch_mount(char *topic, char *data, int data_len)
 {
+    command_t cmd;
+    
     if (memcmp(data, "OFF", data_len) == 0)
     {
-        set_switch_mount = 1;
+        cmd.type = CMD_SWITCH_MOUNT_OFF;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
     if (memcmp(data, "ON", data_len) == 0)
     {
-        set_switch_mount = 2;
+        cmd.type = CMD_SWITCH_MOUNT_ON;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
 }
 
 void ha_cb_switch_setup(char *topic, char *data, int data_len)
 {
+    command_t cmd;
+    
     if (memcmp(data, "OFF", data_len) == 0)
     {
-        set_switch_setup = 1;
+        cmd.type = CMD_SWITCH_SETUP_OFF;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
     if (memcmp(data, "ON", data_len) == 0)
     {
-        set_switch_setup = 2;
+        cmd.type = CMD_SWITCH_SETUP_ON;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
 }
 
 void ha_cb_button_setup(char *topic, char *data, int data_len)
 {
+    command_t cmd;
+    
     if (memcmp(data, "PRESS", data_len) == 0)
     {
-        set_button_setup = 1;
+        cmd.type = CMD_BUTTON_SETUP_PRESS;
+        cmd.value = 0;
+        xQueueSend(command_queue, &cmd, 0);
     }
 }
 
@@ -302,12 +350,15 @@ void ha_cb_number_rpm(char *topic, char *data, int data_len)
     char buffer[data_len + 1];
     memset(buffer, 0, data_len + 1);
     memcpy(buffer, data, data_len);
+    
     if (_atoi_checked(buffer, &rpm) == 0)
     {
         if (rpm >= 30 && rpm <= 300)
         {
-            settings.max_speed = rpm;
-            set_rpm_max = 1;
+            command_t cmd;
+            cmd.type = CMD_NUMBER_RPM;
+            cmd.value = rpm;
+            xQueueSend(command_queue, &cmd, 0);
         }
     }
 }
@@ -463,6 +514,14 @@ void app_main(void)
         vTaskDelay(50);
     }
 
+    // Create command queue
+    command_queue = xQueueCreate(COMMAND_QUEUE_SIZE, sizeof(command_t));
+    if (command_queue == NULL)
+    {
+        ESP_LOGE("MAIN", "Failed to create command queue");
+        return;
+    }
+
     // restore position on boot
     stepper_set_position(&stepper, settings.roller_pos);
 
@@ -537,140 +596,115 @@ void app_main(void)
 
     stp_setup_state_t setup_active_state = STP_SETUP_NONE;
     int32_t setup_limit_step = settings.roller_limit;
-    uint8_t stepper_moving = 0;
+    uint8_t stepper_moving_state = 0;
 
     while (1)
     {
         vTaskDelay(1);
 
-        if (set_cover_state)
+        // Process commands from queue
+        command_t cmd;
+        if (xQueueReceive(command_queue, &cmd, 0) == pdTRUE)
         {
-            ESP_LOGI("MAIN", "set_cover_state changed to %d\n", set_cover_state);
+            ESP_LOGI("MAIN", "Processing command type: %d, value: %d\n", cmd.type, cmd.value);
 
-            // setup not active?
-            if (setup_active_state == STP_SETUP_NONE)
+            switch (cmd.type)
             {
-                if (set_cover_state == 1)
+            case CMD_COVER_OPEN:
+                // setup not active?
+                if (setup_active_state == STP_SETUP_NONE)
                 {
                     if (stepper_ready(&stepper))
                     {
                         ha_lib_cover_set_state(cover_handle, "opening");
                         stepper_go_to_pos(&stepper, settings.max_speed, 0);
-                        stepper_moving = 1;
+                        stepper_moving_state = 1;
+                    }
+                    else
+                    {
+                        // Stepper busy, re-enqueue command
+                        xQueueSend(command_queue, &cmd, 0);
                     }
                 }
-                else if (set_cover_state == 2)
+                break;
+
+            case CMD_COVER_CLOSE:
+                // setup not active?
+                if (setup_active_state == STP_SETUP_NONE)
                 {
                     if (stepper_ready(&stepper))
                     {
                         ha_lib_cover_set_state(cover_handle, "closing");
                         stepper_go_to_pos(&stepper, settings.max_speed, setup_limit_step);
-                        stepper_moving = 2;
+                        stepper_moving_state = 2;
+                    }
+                    else
+                    {
+                        // Stepper busy, re-enqueue command
+                        xQueueSend(command_queue, &cmd, 0);
                     }
                 }
-                else if (set_cover_state == 3)
-                {
-                    stepper_stop(&stepper);
-                    stepper_moving = 3;
-                }
-                else if (set_cover_state >= 100)
-                {
-                    int calc_pos = setup_limit_step * (set_cover_state - 100) / 100;
-                    stepper_go_to_pos(&stepper, settings.max_speed, calc_pos);
-                    stepper_moving = 4;
-                }
-            }
+                break;
 
-            set_cover_state = 0;
-        }
+            case CMD_COVER_STOP:
+                stepper_stop(&stepper);
+                stepper_moving_state = 3;
+                break;
 
-        if (stepper_moving && stepper_ready(&stepper))
-        {
-            if (stepper_moving == 1)
-            {
-                ha_lib_cover_set_position(cover_handle, 0);
-                ha_lib_cover_set_state(cover_handle, "open");
-            }
-            else if (stepper_moving == 2)
-            {
-                ha_lib_cover_set_position(cover_handle, 100);
-                ha_lib_cover_set_state(cover_handle, "close");
-            }
-            else if (stepper_moving == 3)
-            {
-                float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
-                ha_lib_cover_set_position(cover_handle, (int)calc_pos);
-                if (calc_pos == 100)
+            case CMD_COVER_POSITION:
+                // setup not active?
+                if (setup_active_state == STP_SETUP_NONE)
                 {
-                    ha_lib_cover_set_state(cover_handle, "close");
-                }
-                else
-                {
-                    ha_lib_cover_set_state(cover_handle, "open");
-                }
-            }
-            else if (stepper_moving == 4)
-            {
-                float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
-                ha_lib_cover_set_position(cover_handle, (int)calc_pos);
-                if (calc_pos == 100)
-                {
-                    ha_lib_cover_set_state(cover_handle, "close");
-                }
-                else
-                {
-                    ha_lib_cover_set_state(cover_handle, "open");
-                }
-            }
+                    if (stepper_ready(&stepper))
+                    {
+                        int calc_pos = setup_limit_step * cmd.value / 100;
+                        stepper_go_to_pos(&stepper, settings.max_speed, calc_pos);
+                        stepper_moving_state = 4;
 
-            settings.roller_pos = stepper.step_position;
-            save_settings(&settings);
+                        // if we move to a bigger position, we are closing. If we move to a smaller position, we are opening
+                        if (calc_pos > stepper.step_position)
+                        {
+                            ha_lib_cover_set_state(cover_handle, "closing");
+                        }
+                        else
+                        {
+                            ha_lib_cover_set_state(cover_handle, "opening");
+                        }
+                    }
+                    else
+                    {
+                        // Stepper busy, re-enqueue command
+                        xQueueSend(command_queue, &cmd, 0);
+                    }
+                }
+                break;
 
-            stepper_moving = 0;
-        }
-
-        if (set_switch_mount)
-        {
-            ESP_LOGI("MAIN", "set_switch_mount changed to %d\n", set_switch_mount);
-            if (set_switch_mount == 1)
-            {
+            case CMD_SWITCH_MOUNT_OFF:
                 stepper_set_invert(&stepper, 0);
                 settings.dir_invert = 0;
                 save_settings(&settings);
                 ha_lib_switch_update(switch_handle_mount, "OFF");
-            }
-            else if (set_switch_mount == 2)
-            {
+                break;
+
+            case CMD_SWITCH_MOUNT_ON:
                 stepper_set_invert(&stepper, 1);
                 settings.dir_invert = 1;
                 save_settings(&settings);
                 ha_lib_switch_update(switch_handle_mount, "ON");
-            }
-            set_switch_mount = 0;
-        }
+                break;
 
-        if (set_switch_setup)
-        {
-            ESP_LOGI("MAIN", "set_switch_setup changed to %d\n", set_switch_setup);
-            if (set_switch_setup == 1)
-            {
+            case CMD_SWITCH_SETUP_OFF:
                 stepper_stop(&stepper);
                 setup_active_state = STP_SETUP_NONE;
                 ha_lib_switch_update(switch_handle, "OFF");
-            }
-            else if (set_switch_setup == 2)
-            {
+                break;
+
+            case CMD_SWITCH_SETUP_ON:
                 setup_active_state = STP_SETUP_DOWN_FAST;
                 ha_lib_switch_update(switch_handle, "ON");
-            }
-            set_switch_setup = 0;
-        }
+                break;
 
-        if (set_button_setup)
-        {
-            ESP_LOGI("MAIN", "set_button_setup changed to %d\n", set_button_setup);
-            if (set_button_setup == 1)
-            {
+            case CMD_BUTTON_SETUP_PRESS:
                 // setup active?
                 switch (setup_active_state)
                 {
@@ -721,13 +755,63 @@ void app_main(void)
                 default:
                     break;
                 }
+                break;
+
+            case CMD_NUMBER_RPM:
+                settings.max_speed = cmd.value;
+                save_settings(&settings);
+                ha_lib_number_update(number_handle, settings.max_speed);
+                break;
+
+            default:
+                ESP_LOGW("MAIN", "Unknown command type: %d\n", cmd.type);
+                break;
             }
-            set_button_setup = 0;
         }
 
-        if (set_rpm_max) {
-            ha_lib_number_update(number_handle, settings.max_speed);
-            set_rpm_max = 0;
+        if (stepper_moving_state && stepper_ready(&stepper))
+        {
+            if (stepper_moving_state == 1)
+            {
+                ha_lib_cover_set_position(cover_handle, 0);
+                ha_lib_cover_set_state(cover_handle, "open");
+            }
+            else if (stepper_moving_state == 2)
+            {
+                ha_lib_cover_set_position(cover_handle, 100);
+                ha_lib_cover_set_state(cover_handle, "close");
+            }
+            else if (stepper_moving_state == 3)
+            {
+                float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
+                ha_lib_cover_set_position(cover_handle, (int)calc_pos);
+                if (calc_pos == 100)
+                {
+                    ha_lib_cover_set_state(cover_handle, "close");
+                }
+                else
+                {
+                    ha_lib_cover_set_state(cover_handle, "open");
+                }
+            }
+            else if (stepper_moving_state == 4)
+            {
+                float calc_pos = ((float)stepper.step_position / (float)setup_limit_step * (float)100) + 1;
+                ha_lib_cover_set_position(cover_handle, (int)calc_pos);
+                if (calc_pos == 100)
+                {
+                    ha_lib_cover_set_state(cover_handle, "close");
+                }
+                else
+                {
+                    ha_lib_cover_set_state(cover_handle, "open");
+                }
+            }
+
+            settings.roller_pos = stepper.step_position;
+            save_settings(&settings);
+
+            stepper_moving_state = 0;
         }
     }
 }
